@@ -1,0 +1,25 @@
+# Unity caches & builds
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild*/
+[Ll]ogs/
+UserSettings/
+MemoryCaptures/
+SysInfo/
+
+# IDE
+.vs/
+.vscode/
+*.csproj
+*.sln
+*.user
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Reports
+*.stacktrace
+
