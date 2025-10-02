@@ -22,13 +22,9 @@ public class GameManager : MonoBehaviour
     public AudioSource audioSource;
     public AudioClip damageSE;
 
-    // 入力ロック（バナー表示中など）
     public bool inputLocked { get; private set; } = false;
 
-    // 敵リスト
     private readonly List<EnemyAIBase> enemyList = new List<EnemyAIBase>();
-
-    // 罠リスト
     private readonly List<TrapBaseSequenced> trapList = new List<TrapBaseSequenced>();
 
     [Header("罠の実行テンポ")]
@@ -37,17 +33,46 @@ public class GameManager : MonoBehaviour
     [SerializeField] private float afterTrapsDelay = 0.20f;
 
     private bool _advancing = false;
-
-    // 周回カウント（Playerターン開始で+1）
     private int _cycleIndex = 1;
     private bool _firstPlayerBannerShown = false;
 
-    // 任意の外部通知
     public event System.Action OnRoundAdvanced;
 
-    // GameOver
     private bool isGameOver = false;
     public bool IsGameOver() => isGameOver;
+
+    // === 追加: 1ターン1アクション制御 ===
+    private bool actionConsumed = false; // 行動を消費済みか
+    private bool actionBegun = false; // 行動“開始中”（先取りゲート）
+
+    /// <summary>今ターン、行動を開始してよいか（未開始・未消費・プレイヤーターン・非ロック）</summary>
+    public bool TryBeginAction()
+    {
+        if (currentState != TurnState.Player_Turn) return false;
+        if (inputLocked) return false;
+        if (actionConsumed) return false;
+        if (actionBegun) return false; // ★ ここで多重発火をブロック
+
+        actionBegun = true;
+        return true;
+    }
+
+    /// <summary>行動を消費（ターン終了まで）（行動完了時に呼ぶ）</summary>
+    public void ConsumeAction()
+    {
+        if (currentState != TurnState.Player_Turn) return;
+        if (actionConsumed) return;
+
+        actionConsumed = true;
+        actionBegun = false;
+        EndPlayerTurn();
+    }
+
+    private void ResetActionFlags()
+    {
+        actionConsumed = false;
+        actionBegun = false;
+    }
 
     private void Awake()
     {
@@ -63,7 +88,7 @@ public class GameManager : MonoBehaviour
         if (gameOverPanel != null) gameOverPanel.SetActive(false);
 
         // 最初は Player ターンから
-        StartCoroutine(SwitchPhase(TurnState.Player_Move));
+        StartCoroutine(SwitchPhase(TurnState.Player_Turn));
     }
 
     private void Update()
@@ -74,19 +99,11 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    public void NextState()
+    /// <summary>プレイヤーが行動（Move/Action）を消費したら呼ばれる</summary>
+    public void EndPlayerTurn()
     {
         if (_advancing || isGameOver) return;
-
-        TurnState next = currentState switch
-        {
-            TurnState.Player_Move => TurnState.Player_Action,
-            TurnState.Player_Action => TurnState.Enemy_Turn,
-            TurnState.Enemy_Turn => TurnState.Player_Move,
-            _ => TurnState.Player_Move
-        };
-
-        StartCoroutine(SwitchPhase(next));
+        StartCoroutine(SwitchPhase(TurnState.Enemy_Turn));
     }
 
     private IEnumerator SwitchPhase(TurnState next)
@@ -95,10 +112,10 @@ public class GameManager : MonoBehaviour
         _advancing = true;
         inputLocked = true;
 
-        // バナー表示（Player / Enemy のみ）
+        // バナー表示
         if (turnBanner != null)
         {
-            if (next == TurnState.Player_Move)
+            if (next == TurnState.Player_Turn)
             {
                 if (_firstPlayerBannerShown) _cycleIndex++;
                 else _firstPlayerBannerShown = true;
@@ -119,19 +136,14 @@ public class GameManager : MonoBehaviour
 
         currentState = next;
 
-        // ===== Interval: フェーズ開始時に罠の残ターンを進める =====
+        // フェーズ開始時に罠の残ターン進行
         AdvanceTrapsForPhase(next);
 
-        if (next == TurnState.Player_Move)
+        if (next == TurnState.Player_Turn)
         {
+            ResetActionFlags(); // ★ プレイヤーターン開始でリセット
             OnRoundAdvanced?.Invoke();
             AttackTileDirector.Instance?.RefreshAll();
-            inputLocked = false;
-        }
-        else if (next == TurnState.Player_Action)
-        {
-            var player = FindObjectOfType<PlayerMover>();
-            if (player != null) player.ApplyCurrentActionAnimation();
             inputLocked = false;
         }
         else if (next == TurnState.Enemy_Turn)
@@ -142,7 +154,6 @@ public class GameManager : MonoBehaviour
         _advancing = false;
     }
 
-    // Interval カウントダウン
     private void AdvanceTrapsForPhase(TurnState phase)
     {
         if (trapList.Count == 0) return;
@@ -173,11 +184,11 @@ public class GameManager : MonoBehaviour
 
             if (afterTrapsDelay > 0f) yield return new WaitForSeconds(afterTrapsDelay);
 
-            if (!isGameOver) yield return SwitchPhase(TurnState.Player_Move);
+            if (!isGameOver) yield return SwitchPhase(TurnState.Player_Turn);
             yield break;
         }
 
-        // 敵AIを順に実行
+        // 敵AI順次実行
         foreach (EnemyAIBase ai in new List<EnemyAIBase>(enemyList))
         {
             if (isGameOver) break;
@@ -198,10 +209,9 @@ public class GameManager : MonoBehaviour
 
         if (afterTrapsDelay > 0f) yield return new WaitForSeconds(afterTrapsDelay);
 
-        if (!isGameOver) yield return SwitchPhase(TurnState.Player_Move);
+        if (!isGameOver) yield return SwitchPhase(TurnState.Player_Turn);
     }
 
-    // 罠の順次実行
     private IEnumerator HandleTrapsAfterEnemies()
     {
         if (trapList.Count == 0) yield break;
@@ -267,7 +277,6 @@ public class GameManager : MonoBehaviour
 
     public List<EnemyAIBase> GetEnemyList() => enemyList;
 
-    // 罠の登録API
     public void RegisterTrap(TrapBaseSequenced t)
     {
         if (t != null && !trapList.Contains(t)) trapList.Add(t);

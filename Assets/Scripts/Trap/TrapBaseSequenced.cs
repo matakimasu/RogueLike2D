@@ -18,6 +18,7 @@ public abstract class TrapBaseSequenced : MonoBehaviour
     public bool requireArmed = true;
     public bool disarmAfterAct = true;
 
+    // （視界起動は使わないが、既存プレハブ互換のため残置）
     public string visionLayerName = "Vision";
     public string playerVisionTag = "PlayerVision";
     public string bulletVisionTag = "BulletVision";
@@ -26,7 +27,7 @@ public abstract class TrapBaseSequenced : MonoBehaviour
 
     [Header("Attack")]
     public int attackPower = 2;
-    public LayerMask hitLayers;                  // Enemy / Player / Bullet を含める
+    public LayerMask hitLayers;                  // Enemy / Player / Bullet など
     public Vector2 cellHitBox = new Vector2(0.9f, 0.9f);
 
     [Header("Blocking")]
@@ -66,9 +67,11 @@ public abstract class TrapBaseSequenced : MonoBehaviour
     public event System.Action<TrapBaseSequenced> OnArmed;        // Arm直後
     public event System.Action<TrapBaseSequenced> OnArmedVisual;  // SE後の可視化
 
+    // 拡張フック
     public virtual bool ShouldActOnPhase(TurnState phase)
     {
-        return (phase == TurnState.Player_Move && actOnPlayerTurn)
+        // ★ Player_Move → Player_Turn に統合済み
+        return (phase == TurnState.Player_Turn && actOnPlayerTurn)
             || (phase == TurnState.Enemy_Turn && actOnEnemyTurn);
     }
     public virtual bool IsReadyToAct() => true;
@@ -111,7 +114,7 @@ public abstract class TrapBaseSequenced : MonoBehaviour
         SetTurnsRemaining(Mathf.Max(0, initialOffset));
     }
 
-    /// <summary>フェーズ開始時に GameManager から呼ばれる。該当フェーズのみ残ターン-1。</summary>
+    /// <summary>フェーズ開始時などに GameManager から呼ぶ想定。</summary>
     public void OnTurnAdvanced(TurnState phase)
     {
         if (!ShouldActOnPhase(phase)) return;
@@ -130,29 +133,16 @@ public abstract class TrapBaseSequenced : MonoBehaviour
         SetTurnsRemaining(wait);
     }
 
-    // ===== 起動判定（Vision Trigger等が入ったら Arm） =====
-    private void OnTriggerEnter2D(Collider2D other)
+    // ===== 視界トリガーは削除（攻撃で起動） =====
+
+    // 外部（プレイヤー攻撃など）から強制起動
+    public void ForceArm()
     {
         if (armed) return;
-
-        bool matched = false;
-
-        if (useLayerCheck)
-        {
-            int visionLayer = LayerMask.NameToLayer(visionLayerName);
-            if (visionLayer >= 0 && other.gameObject.layer == visionLayer)
-                matched = true;
-        }
-
-        if (!matched && useTagCheck)
-        {
-            if (!string.IsNullOrEmpty(playerVisionTag) && other.CompareTag(playerVisionTag)) matched = true;
-            if (!string.IsNullOrEmpty(bulletVisionTag) && other.CompareTag(bulletVisionTag)) matched = true;
-        }
-
-        if (matched) Arm();
+        Arm();
     }
 
+    // ★ Arm：SE → OnArmed 即時 →（必要なら）SE終了後に OnArmedVisual
     protected virtual void Arm()
     {
         armed = true;
@@ -226,6 +216,7 @@ public abstract class TrapBaseSequenced : MonoBehaviour
             {
                 if (h == null) continue;
 
+                // 弾は一度だけ破壊
                 if (h.CompareTag("Bullet"))
                 {
                     if (processedBullets.Add(h.gameObject))
@@ -235,17 +226,21 @@ public abstract class TrapBaseSequenced : MonoBehaviour
                     continue;
                 }
 
+                // 敵は一度だけダメージ
                 if (h.TryGetComponent<EnemyHealth>(out var enemy))
                 {
                     if (processedEnemies.Add(enemy))
                     {
                         enemy.TakeDamage(attackPower);
+
+                        // 任意：ヒット演出
                         var ai = enemy.GetComponent<EnemyAIBase>();
                         ai?.PlayDamageFlash();
                     }
                     continue;
                 }
 
+                // プレイヤーも一度だけ
                 if (!playerProcessed && h.CompareTag("Player"))
                 {
                     GameManager.Instance?.TakeDamage(attackPower);
@@ -256,21 +251,22 @@ public abstract class TrapBaseSequenced : MonoBehaviour
         }
     }
 
-    // ===== 直進列挙：壁/罠で停止（当たったセルは含めない） =====
+    // ===== 直進列挙：壁/罠に当たるまで（当たったセルは含めない） =====
     protected IEnumerable<Vector3Int> RayCells(Vector3Int origin, Vector3Int dir)
     {
         var c = origin + dir;
         while (true)
         {
-            if (wallTilemap.HasTile(c)) yield break;
-            if (!floorTilemap.HasTile(c)) yield break;
-            if (stopRayOnTrap && IsTrapBlockingCell(c)) yield break;
+            if (wallTilemap.HasTile(c)) yield break;     // 壁で停止
+            if (!floorTilemap.HasTile(c)) yield break;   // 床範囲外で停止
+            if (stopRayOnTrap && IsTrapBlockingCell(c)) yield break; // 罠で停止
 
             yield return c;
             c += dir;
         }
     }
 
+    // そのセルに罠があるか？（自分以外）
     private bool IsTrapBlockingCell(Vector3Int cell)
     {
         if (trapBlockLayer.value != 0)
@@ -298,7 +294,7 @@ public abstract class TrapBaseSequenced : MonoBehaviour
         return false;
     }
 
-    // ====== 表示用プレビュー ======
+    // ====== 表示用のプレビュー ======
     public IEnumerable<Vector3Int> PreviewCells()
     {
         if (floorTilemap == null) yield break;
@@ -307,6 +303,7 @@ public abstract class TrapBaseSequenced : MonoBehaviour
             yield return c;
     }
 
+    // 任意の原点で外部から取得したい場合のラッパ
     public IEnumerable<Vector3Int> GetAttackCells(Vector3Int origin)
     {
         foreach (var c in EnumerateAttackCells(origin))

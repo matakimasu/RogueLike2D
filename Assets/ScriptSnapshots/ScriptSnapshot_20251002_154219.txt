@@ -1,0 +1,2794 @@
+﻿// Snapshot generated: 2025-10-02 15:42:19
+// Project: RogueLike2D
+================================================================================
+
+=== Assets\Editor\ExportAllScriptsSnapshot.cs ===
+
+// Assets/Editor/ExportAllScriptsSnapshot.cs
+using System;
+using System.IO;
+using System.Text;
+using System.Linq;
+using UnityEditor;
+using UnityEngine;
+
+public static class ExportAllScriptsSnapshot
+{
+    [MenuItem("Tools/Export All C# Scripts Snapshot")]
+    public static void Export()
+    {
+        try
+        {
+            var projectPath = Directory.GetCurrentDirectory();
+            var assetsPath = Path.Combine(projectPath, "Assets");
+            var outDir = Path.Combine(assetsPath, "ScriptSnapshots");
+            Directory.CreateDirectory(outDir);
+
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            var outPath = Path.Combine(outDir, "ScriptSnapshot_" + timestamp + ".txt");
+
+            var csFiles = Directory.GetFiles(assetsPath, "*.cs", SearchOption.AllDirectories)
+                                   .Where(p => !p.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+                                   .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+                                   .ToArray();
+
+            var sb = new StringBuilder();
+            sb.AppendLine("// Snapshot generated: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+            sb.AppendLine("// Project: " + new DirectoryInfo(projectPath).Name);
+            sb.AppendLine(new string('=', 80));
+
+            foreach (var file in csFiles)
+            {
+                string rel = file.Replace(projectPath + Path.DirectorySeparatorChar, string.Empty);
+                sb.AppendLine();
+                sb.AppendLine("=== " + rel + " ===");
+                sb.AppendLine();
+
+                string code = File.ReadAllText(file, new UTF8Encoding(true));
+                sb.AppendLine(code);
+                sb.AppendLine();
+                sb.AppendLine(new string('-', 80));
+            }
+
+            File.WriteAllText(outPath, sb.ToString(), new UTF8Encoding(true));
+            Debug.Log("[ExportAllScriptsSnapshot] Wrote " + csFiles.Length + " files -> " + outPath);
+            EditorUtility.RevealInFinder(outPath);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("ExportAllScriptsSnapshot failed: " + ex);
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\AttackProfile.cs ===
+
+using System.Collections.Generic;
+using UnityEngine;
+
+public class AttackProfile : MonoBehaviour
+{
+    public enum Shape { Cross, DiagonalsOnly, Square, Diamond }
+    // Cross=�㉺���E, DiagonalsOnly=�΂߂̂�, Square=8�ߖT�n(Chebyshev), Diamond=�H�`(Manhattan)
+
+    [Min(1)] public int range = 1;
+    public Shape shape = Shape.Cross;
+
+    public IEnumerable<Vector3Int> EnumerateCells(Vector3Int origin)
+    {
+        yield return origin; // ���S��܂߂����Ȃ���΍폜
+
+        switch (shape)
+        {
+            case Shape.Cross:
+                for (int r = 1; r <= range; r++)
+                {
+                    yield return origin + new Vector3Int(r, 0, 0);
+                    yield return origin + new Vector3Int(-r, 0, 0);
+                    yield return origin + new Vector3Int(0, r, 0);
+                    yield return origin + new Vector3Int(0, -r, 0);
+                }
+                break;
+
+            case Shape.DiagonalsOnly:
+                for (int r = 1; r <= range; r++)
+                {
+                    yield return origin + new Vector3Int(r, r, 0);
+                    yield return origin + new Vector3Int(r, -r, 0);
+                    yield return origin + new Vector3Int(-r, r, 0);
+                    yield return origin + new Vector3Int(-r, -r, 0);
+                }
+                break;
+
+            case Shape.Square: // Chebyshev���� <= range
+                for (int x = -range; x <= range; x++)
+                    for (int y = -range; y <= range; y++)
+                        yield return origin + new Vector3Int(x, y, 0);
+                break;
+
+            case Shape.Diamond: // Manhattan���� <= range
+                for (int x = -range; x <= range; x++)
+                {
+                    int yMax = range - Mathf.Abs(x);
+                    for (int y = -yMax; y <= yMax; y++)
+                        yield return origin + new Vector3Int(x, y, 0);
+                }
+                break;
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\AttackTileDirector.cs ===
+
+using System.Collections.Generic;
+using UnityEngine;
+
+public class AttackTileDirector : MonoBehaviour
+{
+    public static AttackTileDirector Instance { get; private set; }
+
+    private void Awake()
+    {
+        if (Instance != null && Instance != this) { Destroy(gameObject); return; }
+        Instance = this;
+    }
+
+    private void OnEnable()
+    {
+        // �^�[���`���Ŗ���X�V
+        TurnSignal.OnPlayerTurnStart += RefreshAll;
+        TurnSignal.OnEnemyTurnStart += RefreshAll;
+
+        // �V�[����̊���㩂ɉ����ʒm��w�ǁi�N��SE�I�����\��OK�̃^�C�~���O�j
+        foreach (var t in FindObjectsOfType<TrapBaseSequenced>())
+            t.OnArmedVisual += HandleTrapArmedVisual;
+    }
+
+    private void OnDisable()
+    {
+        TurnSignal.OnPlayerTurnStart -= RefreshAll;
+        TurnSignal.OnEnemyTurnStart -= RefreshAll;
+
+        foreach (var t in FindObjectsOfType<TrapBaseSequenced>())
+            t.OnArmedVisual -= HandleTrapArmedVisual;
+    }
+
+    // 㩂��u�\��OK�v�ɂȂ����u�Ԃɑ����f�i�Â��̂�����čŐV�����\���j
+    private void HandleTrapArmedVisual(TrapBaseSequenced _)
+    {
+        RefreshTrapsOnly();
+    }
+
+    // ========= ���JAPI =========
+
+    /// <summary>�G�E㩂���ׂčŐV��Ԃŕ`�������i�Â��\���͊��S�N���A�j</summary>
+    public void RefreshAll()
+    {
+        var svc = AttackTileService.Instance;
+        if (svc == null) return;
+
+        // 1) ���W
+        var enemyCounts = BuildEnemyCounts();
+        var trapDirs = BuildTrapDirs();
+
+        // 2) �S����
+        svc.ClearAll();
+
+        // 3) �ĕ`��i�g�A�j���͔p�~�j
+        svc.PaintEnemyStaticLayered(enemyCounts);
+        svc.PaintTrapArrowsLayered(trapDirs);
+    }
+
+    /// <summary>
+    /// �G�̍s������ȂǁA�Â��\�����c��Ȃ��悤��
+    /// ��x�S�������Ă���u�G�{㩁v��܂Ƃ߂čĕ`��i=�ŐV���j
+    /// </summary>
+    public void RefreshEnemyOnly()
+    {
+        RefreshAll();
+    }
+
+    /// <summary>
+    /// 㩂̉����C�x���g����Ȃǂ�A�S�������ŐV�ŕ`��i=�Â��\����c���Ȃ��j
+    /// </summary>
+    public void RefreshTrapsOnly()
+    {
+        RefreshAll();
+    }
+
+    // ========= ����F�G�Z���̏d���J�E���g =========
+    private Dictionary<Vector3Int, int> BuildEnemyCounts()
+    {
+        var enemyCounts = new Dictionary<Vector3Int, int>();
+
+        foreach (var ai in FindObjectsOfType<EnemyAIBase>())
+        {
+            if (ai == null) continue;
+
+            foreach (var c in ai.GetAttackCellsPreview())
+            {
+                if (enemyCounts.TryGetValue(c, out var n)) enemyCounts[c] = n + 1;
+                else enemyCounts[c] = 1;
+            }
+        }
+
+        return enemyCounts;
+    }
+
+    // ========= ����F㩃Z�����������X�g�iarmed�̂݁j =========
+    private Dictionary<Vector3Int, List<Vector2Int>> BuildTrapDirs()
+    {
+        var trapDirs = new Dictionary<Vector3Int, List<Vector2Int>>();
+
+        foreach (var t in FindObjectsOfType<TrapBaseSequenced>())
+        {
+            if (t == null || t.floorTilemap == null || !t.IsArmed) continue;
+
+            var origin = t.floorTilemap.WorldToCell(t.transform.position);
+            foreach (var cell in t.PreviewCells())
+            {
+                var dx = Mathf.Clamp(cell.x - origin.x, -1, 1);
+                var dy = Mathf.Clamp(cell.y - origin.y, -1, 1);
+                var dir = new Vector2Int(dx, dy);
+                if (dir == Vector2Int.zero) continue;
+
+                if (!trapDirs.TryGetValue(cell, out var list))
+                {
+                    list = new List<Vector2Int>();
+                    trapDirs[cell] = list;
+                }
+                // �������̏d����1�{�Ɂi�����{���������ꍇ��Contains��O���j
+                if (!list.Contains(dir)) list.Add(dir);
+            }
+        }
+
+        // ���F���̂��ߌŒ菇�Ń\�[�g�i�C�Ӂj
+        foreach (var kv in trapDirs)
+        {
+            kv.Value.Sort((a, b) =>
+            {
+                int Rank(Vector2Int d)
+                {
+                    if (d == new Vector2Int(0, 1)) return 0;  // ��
+                    if (d == new Vector2Int(1, 0)) return 1;  // ��
+                    if (d == new Vector2Int(0, -1)) return 2; // ��
+                    if (d == new Vector2Int(-1, 0)) return 3; // ��
+                    if (d == new Vector2Int(1, 1)) return 4;  // �΂�
+                    if (d == new Vector2Int(1, -1)) return 5;
+                    if (d == new Vector2Int(-1, 1)) return 6;
+                    return 7;
+                }
+                return Rank(a).CompareTo(Rank(b));
+            });
+        }
+
+        return trapDirs;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\AttackTileService.cs ===
+
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.Tilemaps;
+
+public class AttackTileService : MonoBehaviour
+{
+    public static AttackTileService Instance { get; private set; }
+
+    [Header("Enemy Overlays (Static symbol layers - back to front)")]
+    [SerializeField] private Tilemap[] enemyOverlays;      // �������C���Ή�
+    [SerializeField] private TileBase enemyStaticTile;     // ��F���A�C�R��
+
+    [Header("Trap Overlays (Arrow-based 8-dir layers - back to front)")]
+    [SerializeField] private Tilemap[] trapOverlays;       // �������C���Ή�
+    [SerializeField] private TileBase trapArrow_U;
+    [SerializeField] private TileBase trapArrow_D;
+    [SerializeField] private TileBase trapArrow_L;
+    [SerializeField] private TileBase trapArrow_R;
+    [SerializeField] private TileBase trapArrow_UL;
+    [SerializeField] private TileBase trapArrow_UR;
+    [SerializeField] private TileBase trapArrow_DL;
+    [SerializeField] private TileBase trapArrow_DR;
+
+    private Dictionary<Vector2Int, TileBase> _trapDirMap;
+
+    private void Awake()
+    {
+        if (Instance != null && Instance != this) { Destroy(gameObject); return; }
+        Instance = this;
+
+        _trapDirMap = new Dictionary<Vector2Int, TileBase>
+        {
+            [new Vector2Int(0, 1)] = trapArrow_U,
+            [new Vector2Int(0, -1)] = trapArrow_D,
+            [new Vector2Int(-1, 0)] = trapArrow_L,
+            [new Vector2Int(1, 0)] = trapArrow_R,
+            [new Vector2Int(-1, 1)] = trapArrow_UL,
+            [new Vector2Int(1, 1)] = trapArrow_UR,
+            [new Vector2Int(-1, -1)] = trapArrow_DL,
+            [new Vector2Int(1, -1)] = trapArrow_DR,
+        };
+    }
+
+    public void ClearAll()
+    {
+        if (enemyOverlays != null)
+            foreach (var tm in enemyOverlays) if (tm) tm.ClearAllTiles();
+        if (trapOverlays != null)
+            foreach (var tm in trapOverlays) if (tm) tm.ClearAllTiles();
+    }
+
+    // �G�F�Z�����d���� �̕��z�`��i���C��0��1���ځA1��2���ځc�j
+    public void PaintEnemyStaticLayered(Dictionary<Vector3Int, int> cellCount)
+    {
+        if (enemyOverlays == null || enemyOverlays.Length == 0 || enemyStaticTile == null) return;
+        int layers = enemyOverlays.Length;
+        if (layers == 0) return;
+
+        // ���C�����Ƃɂ܂Ƃ߂�SetTiles
+        for (int layer = 0; layer < layers; layer++)
+        {
+            var tm = enemyOverlays[layer];
+            if (!tm) continue;
+
+            var cells = new List<Vector3Int>();
+            var tiles = new List<TileBase>();
+            foreach (var kv in cellCount)
+            {
+                // ���̃Z���� layer+1 ���ڂ����݂���Ȃ�`��
+                if (kv.Value > layer)
+                {
+                    cells.Add(kv.Key);
+                    tiles.Add(enemyStaticTile);
+                }
+            }
+            if (cells.Count > 0) tm.SetTiles(cells.ToArray(), tiles.ToArray());
+        }
+    }
+
+    // 㩁F�Z�����������X�g �̕��z�`��i���C��0��1�{�ځA1��2�{�ځc�j
+    public void PaintTrapArrowsLayered(Dictionary<Vector3Int, List<Vector2Int>> cellDirs)
+    {
+        if (trapOverlays == null || trapOverlays.Length == 0) return;
+        int layers = trapOverlays.Length;
+        if (layers == 0) return;
+
+        for (int layer = 0; layer < layers; layer++)
+        {
+            var tm = trapOverlays[layer];
+            if (!tm) continue;
+
+            foreach (var kv in cellDirs)
+            {
+                var list = kv.Value;
+                if (list == null || list.Count <= layer) continue; // ���̑w�ɕ`���ׂ���󂪂Ȃ�
+                var dir = list[layer];
+                if (_trapDirMap != null && _trapDirMap.TryGetValue(dir, out var tile) && tile != null)
+                {
+                    tm.SetTile(kv.Key, tile);
+                }
+            }
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\ClickFlashFX.cs ===
+
+using UnityEngine;
+
+[DisallowMultipleComponent]
+public class ClickFlashFX : MonoBehaviour
+{
+    public SpriteRenderer sr;
+
+    [Header("Timing")]
+    public float duration = 0.22f;
+
+    [Header("Animation")]
+    public float startScale = 0.7f;
+    public float endScale = 1.6f;
+    [Range(0f, 1f)] public float startAlpha = 0.9f;
+    [Range(0f, 1f)] public float endAlpha = 0.0f;
+    public AnimationCurve ease = AnimationCurve.EaseInOut(0, 0, 1, 1);
+
+    [Header("Sorting")]
+    public string sortingLayerName = "Overlays";
+    public int sortingOrder = 600;
+
+    void Reset()
+    {
+        sr = GetComponent<SpriteRenderer>();
+        if (sr == null) sr = gameObject.AddComponent<SpriteRenderer>();
+    }
+
+    public void Play(Vector3 worldPos, Color tint, string layerName, int order)
+    {
+        if (sr == null) sr = GetComponent<SpriteRenderer>();
+        transform.position = worldPos;
+        sr.sortingLayerName = string.IsNullOrEmpty(layerName) ? sortingLayerName : layerName;
+        sr.sortingOrder = order;
+        StartCoroutine(PlayRoutine(tint));
+    }
+
+    System.Collections.IEnumerator PlayRoutine(Color tint)
+    {
+        float t = 0f;
+        while (t < duration)
+        {
+            float k = ease.Evaluate(t / duration);
+            float s = Mathf.Lerp(startScale, endScale, k);
+            float a = Mathf.Lerp(startAlpha, endAlpha, k);
+
+            transform.localScale = new Vector3(s, s, 1f);
+            var c = tint; c.a = a;
+            if (sr != null) sr.color = c;
+
+            t += Time.deltaTime;
+            yield return null;
+        }
+        Destroy(gameObject);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\EnemyHealth.cs ===
+
+using UnityEngine;
+using System;
+
+public class EnemyHealth : MonoBehaviour
+{
+    [Header("HP�ݒ�")]
+    [Min(1)] public int maxHP = 5;
+
+    [SerializeField] private int currentHP;
+
+    // �� HP�ύX��ʒm�icur, max�j
+    public event Action<int, int> OnHPChanged;
+
+    public int CurrentHP => currentHP;
+    public int MaxHP => maxHP;
+
+    private void Awake()
+    {
+        if (currentHP <= 0) currentHP = maxHP;
+        currentHP = Mathf.Clamp(currentHP, 0, maxHP);
+        OnHPChanged?.Invoke(currentHP, maxHP);
+    }
+
+    public void TakeDamage(int amount)
+    {
+        if (amount <= 0) return;
+
+        currentHP = Mathf.Max(currentHP - amount, 0);
+        OnHPChanged?.Invoke(currentHP, maxHP);
+
+        GetComponent<EnemyAIBase>()?.PlayDamageFlash();
+
+        if (currentHP <= 0)
+        {
+            Die();
+        }
+    }
+
+    public void Heal(int amount)
+    {
+        if (amount <= 0) return;
+        currentHP = Mathf.Min(currentHP + amount, maxHP);
+        OnHPChanged?.Invoke(currentHP, maxHP);
+    }
+
+    private void Die()
+    {
+        var ai = GetComponent<EnemyAIBase>();
+        if (GameManager.Instance != null && ai != null)
+        {
+            GameManager.Instance.UnregisterEnemy(ai);
+        }
+        Destroy(gameObject);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\EnemyHpLabel.cs ===
+
+using UnityEngine;
+using TMPro;
+
+[RequireComponent(typeof(TMP_Text))]
+public class EnemyHpLabel : MonoBehaviour
+{
+    public enum Mode { Auto, World3D, UI }
+
+    [Header("���[�h�w��")]
+    public Mode mode = Mode.World3D;   // �� �f�t�H���g�Ń��[���h�����ɌŒ�
+
+    [Header("���[���h(TMP 3D)�p�I�t�Z�b�g")]
+    public Vector3 worldOffset = new Vector3(0f, -0.65f, 0f); // �� �w��ǂ���
+
+    [Header("UI(TextMeshProUGUI)�p�I�t�Z�b�g(px)")]
+    public Vector2 uiAnchoredOffset = new Vector2(0f, -20f);
+
+    [Header("����t���O")]
+    public bool controlX = true;   // X�͏㏑�����Ȃ�
+    public bool controlY = true;    // Y�̂ݐ���
+
+    [Header("�Y�[�����(�C��)")]
+    public bool keepConstantScreenSize = false;
+    public float baseOrthoSize = 5f;
+    public float baseScale = 1f;
+
+    [Header("�`�揇(�C��/3D�̂�)")]
+    public int sortingOrderOffset = 10;
+
+    private TMP_Text text;
+    private EnemyHealth hp;
+    private Transform parent;
+    private Camera cam;
+    private Renderer meshRenderer;
+
+    private bool runtimeIsUI = false; // ���ۂɎg������
+    private int lastHp = int.MinValue, lastMax = int.MinValue;
+
+    void Awake()
+    {
+        text = GetComponent<TMP_Text>();
+        parent = transform.parent;
+        cam = Camera.main;
+
+        if (parent != null) parent.TryGetComponent(out hp);
+
+        // �����[�h����
+        bool autoIsUI = (GetComponent<TextMeshProUGUI>() != null) ||
+                        (GetComponentInParent<Canvas>() != null);
+        runtimeIsUI = mode == Mode.UI ? true :
+                      mode == Mode.World3D ? false : autoIsUI;
+
+        // 3D �̂Ƃ������\�[�g����eSR�ɒǏ]
+        meshRenderer = GetComponent<Renderer>();
+        var parentSR = parent ? parent.GetComponent<SpriteRenderer>() : null;
+        if (!runtimeIsUI && meshRenderer != null && parentSR != null)
+        {
+            meshRenderer.sortingLayerID = parentSR.sortingLayerID;
+            meshRenderer.sortingOrder = parentSR.sortingOrder + sortingOrderOffset;
+        }
+
+        text.alignment = TextAlignmentOptions.MidlineGeoAligned;
+        text.raycastTarget = false;
+    }
+
+    void OnEnable()
+    {
+        if (hp != null) hp.OnHPChanged += HandleHpChanged;
+        ForceRefresh();
+    }
+
+    void OnDisable()
+    {
+        if (hp != null) hp.OnHPChanged -= HandleHpChanged;
+    }
+
+    void LateUpdate()
+    {
+        if (parent == null) return;
+
+        // --- �ʒu���� ---
+        if (runtimeIsUI)
+        {
+            // UI (Canvas�z�� / TextMeshProUGUI)
+            var rt = GetComponent<RectTransform>();
+            if (rt != null)
+            {
+                var ap = rt.anchoredPosition;
+                if (controlX) ap.x = uiAnchoredOffset.x;
+                if (controlY) ap.y = uiAnchoredOffset.y;
+                rt.anchoredPosition = ap;
+            }
+        }
+        else
+        {
+            // ���[���h (3D TMP)
+            var lp = transform.localPosition;
+            if (controlX) lp.x = worldOffset.x;
+            if (controlY) lp.y = worldOffset.y;          // �� -0.65 ��K�p
+            transform.localPosition = lp;
+        }
+
+        // �Y�[�����i�K�v���̂݁j
+        if (keepConstantScreenSize && cam != null)
+        {
+            if (cam.orthographic)
+            {
+                float k = baseOrthoSize / Mathf.Max(0.0001f, cam.orthographicSize);
+                transform.localScale = Vector3.one * baseScale * k;
+            }
+            else
+            {
+                float dist = Vector3.Distance(cam.transform.position, transform.position);
+                float k = Mathf.Clamp(dist, 0.1f, 100f) / 10f;
+                transform.localScale = Vector3.one * baseScale * k;
+            }
+        }
+
+        SoftRefresh();
+    }
+
+    private void HandleHpChanged(int cur, int max) => SetText(cur);
+
+    private void ForceRefresh()
+    {
+        if (hp == null) return;
+        lastHp = hp.CurrentHP; lastMax = hp.MaxHP;
+        SetText(lastHp);
+    }
+
+    private void SoftRefresh()
+    {
+        if (hp == null) return;
+        int cur = hp.CurrentHP, max = hp.MaxHP;
+        if (cur != lastHp || max != lastMax)
+        {
+            lastHp = cur; lastMax = max;
+            SetText(cur);
+        }
+    }
+
+    private void SetText(int cur)
+    {
+        // �t�H���g�ɑS�p�R�������������Ƃ����邽�ߔ��p�ɂ��Ă��܂�
+        if (text != null) text.text = $"HP: {cur}";
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\Enemy\EnemyAI.cs ===
+
+using UnityEngine;
+using UnityEngine.Tilemaps;
+
+public class EnemyAI : EnemyAIBase
+{
+    protected override void Awake()
+    {
+        base.Awake();
+
+        if (playerTransform == null)
+        {
+            GameObject playerObj = GameObject.FindWithTag("Player");
+            if (playerObj != null)
+                playerTransform = playerObj.transform;
+        }
+    }
+
+    // ✅ abstract メソッドの正しいオーバーライド
+    protected override Vector3Int[] GetMovementDirections()
+    {
+        return new Vector3Int[]
+        {
+            Vector3Int.up,
+            Vector3Int.down,
+            Vector3Int.left,
+            Vector3Int.right
+        };
+    }
+
+    protected override bool CanAttackPlayer(Vector3Int enemyCell, Vector3Int playerCell)
+    {
+        int dx = Mathf.Abs(enemyCell.x - playerCell.x);
+        int dy = Mathf.Abs(enemyCell.y - playerCell.y);
+        return (dx == 1 && dy == 0) || (dx == 0 && dy == 1);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\Enemy\EnemyAIBase.cs ===
+
+using UnityEngine;
+using UnityEngine.Tilemaps;
+using System.Collections;
+using System.Collections.Generic;
+
+public abstract class EnemyAIBase : MonoBehaviour
+{
+    [Header("�Q�Ɛݒ�")]
+    [SerializeField] protected Tilemap tilemap;       // �� Floor �p�i�����t�B�[���h��p�����p�j
+    [SerializeField] protected Tilemap wallTilemap;   // �� �ǉ��FWall �p
+    [SerializeField] protected Transform playerTransform;
+
+    [Header("Layer�ݒ�")]
+    [SerializeField] protected LayerMask obstacleLayer; // �ǁE�i���֎~���Ȃǁi�R���C�_�[�x�[�X�j
+    [SerializeField] protected LayerMask playerLayer;   // �v���C���[�̐�L�Z������p�i���ݍ��ݖh�~�j
+
+    [Header("�ړ��ݒ�")]
+    public float moveSpeed = 3.0f;
+
+    [Header("�U���ݒ�")]
+    public int attackPower = 1;
+
+    [Header("�_���[�W���o�ݒ�")]
+    public float flashDuration = 0.2f;
+    public float flashInterval = 0.05f;
+
+    [Header("���ʉ��ݒ�")]
+    public AudioSource audioSource;
+    public AudioClip moveSE;
+    public AudioClip attackSE;
+
+    [Header("���o�i�����W�j�ݒ�")]
+    [Tooltip("�v���C���[�U�����ɑO�i���߂鉉�o��s��")]
+    public bool useLungeOnAttack = true;
+
+    protected SpriteRenderer spriteRenderer;
+
+    protected virtual void Awake()
+    {
+        spriteRenderer = GetComponent<SpriteRenderer>();
+
+        if (playerTransform == null)
+        {
+            GameObject playerObj = GameObject.FindWithTag("Player");
+            if (playerObj != null) playerTransform = playerObj.transform;
+        }
+    }
+
+    protected virtual void Start()
+    {
+        if (tilemap != null)
+        {
+            Vector3Int cell = tilemap.WorldToCell(transform.position);
+            transform.position = tilemap.GetCellCenterWorld(cell);
+        }
+
+        GameManager.Instance?.RegisterEnemy(this);
+    }
+
+    /// <summary>
+    /// �D�揇�ʁF
+    /// 1) �v���C���[��U���ł���Ȃ�U��
+    /// 2) �U���ł��Ȃ� �� �v���C���[�ɋ߂Â��ړ�����݂�iFloor �̂݁AWall �s�A��Q��/�v���C���[��L��s�j
+    /// </summary>
+    public virtual IEnumerator TryMoveTowardPlayer()
+    {
+        if (playerTransform == null || tilemap == null) yield break;
+
+        Vector3Int currentCell = tilemap.WorldToCell(transform.position);
+        Vector3Int playerCell = tilemap.WorldToCell(playerTransform.position);
+
+        // ===== 1) �ߐڍU���\�H =====
+        if (CanAttackPlayer(currentCell, playerCell))
+        {
+            // �����W���o
+            if (useLungeOnAttack)
+            {
+                var lunge = GetComponent<PlayerAttackLunge>();
+                if (lunge != null)
+                {
+                    Vector3 playerCenter = tilemap.GetCellCenterWorld(playerCell);
+                    yield return StartCoroutine(lunge.PlayTowardWorld(playerCenter));
+                }
+            }
+
+            // �U��SE
+            if (audioSource != null && attackSE != null)
+                audioSource.PlayOneShot(attackSE);
+
+            // �_���[�W�K�p
+            GameManager.Instance.TakeDamage(attackPower);
+
+            yield return new WaitForSeconds(0.2f);
+            yield break;
+        }
+
+        // ===== 2) �Ǐ]�ړ��i�������k�ޕ������×~�ɑI��j =====
+        Vector3Int[] directions = GetMovementDirections();
+        foreach (Vector3Int dir in directions)
+        {
+            Vector3Int nextCell = currentCell + dir;
+
+            // --- �� Floor / Wall ����i�ŗD��Œe���j ---
+            bool hasFloor = tilemap.HasTile(nextCell);
+            bool isWall = (wallTilemap != null) && wallTilemap.HasTile(nextCell);
+            if (!hasFloor || isWall) continue;  // Floor ����Ȃ� or Wall �Ƀ^�C�������� �� �i���s��
+
+            Vector3 worldPos = tilemap.GetCellCenterWorld(nextCell);
+            Vector2 checkPoint = new Vector2(worldPos.x, worldPos.y);
+
+            // �i���s�`�F�b�N�i���� & �v���C���[��L�j
+            if (Physics2D.OverlapCircle(checkPoint, 0.1f, playerLayer)) continue;   // �v���C���[�ʒu�͕s��
+            if (Physics2D.OverlapPoint(checkPoint, obstacleLayer)) continue;        // �R���C�_�[��Q���͕s��
+
+            float currentDist = Vector3.SqrMagnitude((Vector3)(currentCell - playerCell));
+            float newDist = Vector3.SqrMagnitude((Vector3)(nextCell - playerCell));
+
+            if (newDist < currentDist)
+            {
+                yield return StartCoroutine(MoveToPosition(worldPos));
+                yield break;
+            }
+        }
+    }
+
+    // ===== ���ۃ��\�b�h =====
+    protected abstract Vector3Int[] GetMovementDirections();
+    protected abstract bool CanAttackPlayer(Vector3Int enemyCell, Vector3Int playerCell);
+
+    // ===== �ړ����� =====
+    protected virtual IEnumerator MoveToPosition(Vector3 target)
+    {
+        if (audioSource != null && moveSE != null)
+            audioSource.PlayOneShot(moveSE);
+
+        while (Vector3.Distance(transform.position, target) > 0.01f)
+        {
+            transform.position = Vector3.MoveTowards(transform.position, target, moveSpeed * Time.deltaTime);
+            yield return null;
+        }
+        transform.position = target;
+    }
+
+    // ===== �_���[�W���o =====
+    public void PlayDamageFlash()
+    {
+        StartCoroutine(DamageFlashRoutine());
+    }
+
+    private IEnumerator DamageFlashRoutine()
+    {
+        if (spriteRenderer == null) yield break;
+
+        float elapsed = 0f;
+        while (elapsed < flashDuration)
+        {
+            spriteRenderer.enabled = !spriteRenderer.enabled;
+            yield return new WaitForSeconds(flashInterval);
+            elapsed += flashInterval;
+        }
+
+        spriteRenderer.enabled = true;
+    }
+
+    // ===== �U���͈̓v���r���[�iAttackTileDirector�p�j =====
+    public virtual IEnumerable<Vector3Int> GetAttackCellsPreview()
+    {
+        if (tilemap == null) yield break;
+
+        Vector3Int currentCell = tilemap.WorldToCell(transform.position);
+        foreach (var dir in GetMovementDirections())
+        {
+            Vector3Int checkCell = currentCell + dir;
+            if (CanAttackPlayer(currentCell, checkCell))
+                yield return checkCell;
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\Enemy\EnemyAIX.cs ===
+
+using UnityEngine;
+using UnityEngine.Tilemaps;
+
+public class EnemyAIX : EnemyAIBase
+{
+    protected override void Awake()
+    {
+        base.Awake();
+
+        // �v���C���[Transform������擾�i���S�̂��ߏd���`�F�b�N�j
+        if (playerTransform == null)
+        {
+            GameObject playerObj = GameObject.FindWithTag("Player");
+            if (playerObj != null)
+                playerTransform = playerObj.transform;
+        }
+    }
+
+    // �ړ�������΂�4�����݂̂Ɍ���
+    protected override Vector3Int[] GetMovementDirections()
+    {
+        return new Vector3Int[]
+        {
+            new Vector3Int( 1,  1, 0),   // �E��
+            new Vector3Int( 1, -1, 0),   // �E��
+            new Vector3Int(-1,  1, 0),   // ����
+            new Vector3Int(-1, -1, 0)    // ����
+        };
+    }
+
+    // �U�������΂߂̂݁i�΂�1�}�X���U���Ώہj
+    protected override bool CanAttackPlayer(Vector3Int enemyCell, Vector3Int playerCell)
+    {
+        int dx = Mathf.Abs(enemyCell.x - playerCell.x);
+        int dy = Mathf.Abs(enemyCell.y - playerCell.y);
+        return (dx == 1 && dy == 1);
+    }
+
+    // �� GetAttackCellsPreview() �� EnemyAIBase ���̊��������OK
+    //    �i��� GetMovementDirections / CanAttackPlayer ��g���Ď΂�4������v���r���[���܂��j
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\FitSidePanesToCamera.cs ===
+
+using UnityEngine;
+
+/// <summary>
+/// �J�����̃r���[�|�[�g�]���ipillarbox / letterbox�j�ɍ��킹��
+/// ���E�̃y�C���̕��������������B
+/// Canvas �� Screen Space - Overlay �����B
+/// </summary>
+public class FitSidePanesToCamera : MonoBehaviour
+{
+    public Camera targetCamera;
+    public RectTransform leftPane;
+    public RectTransform rightPane;
+
+    void LateUpdate()
+    {
+        if (targetCamera == null || leftPane == null || rightPane == null) return;
+
+        // cam.rect �͐��K��(0..1)�B�����s�N�Z�����ɕϊ�
+        Rect r = targetCamera.rect;
+        float screenW = Screen.width;
+        float screenH = Screen.height;
+
+        float viewWpx = r.width * screenW;
+        float sidePx = (screenW - viewWpx) * 0.5f; // ���E�]��
+
+        // ���y�C��
+        Vector2 lmin = new Vector2(0, 0);
+        Vector2 lmax = new Vector2(0, 1);
+        leftPane.anchorMin = lmin;
+        leftPane.anchorMax = lmax;
+        leftPane.offsetMin = new Vector2(0, 0);               // ���[����
+        leftPane.offsetMax = new Vector2(sidePx, 0);          // �E�[�� sidePx ��
+
+        // �E�y�C��
+        Vector2 rmin = new Vector2(1, 0);
+        Vector2 rmax = new Vector2(1, 1);
+        rightPane.anchorMin = rmin;
+        rightPane.anchorMax = rmax;
+        rightPane.offsetMin = new Vector2(-sidePx, 0);        // ���[�� -sidePx ��
+        rightPane.offsetMax = new Vector2(0, 0);              // �E�[��
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\GameManager.cs ===
+
+using UnityEngine;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine.SceneManagement;
+
+public class GameManager : MonoBehaviour
+{
+    public static GameManager Instance;
+
+    public TurnState currentState { get; private set; }
+
+    [Header("Player HP �Ǘ�")]
+    public int maxHP = 20;
+    private int currentHP;
+
+    [Header("UI �Q��")]
+    public HPHud hpHud;
+    public TurnBanner turnBanner;
+    [SerializeField] private GameObject gameOverPanel;
+
+    [Header("�T�E���h�ݒ�")]
+    public AudioSource audioSource;
+    public AudioClip damageSE;
+
+    // ���̓��b�N�i�o�i�[�\�����Ȃǁj
+    public bool inputLocked { get; private set; } = false;
+
+    // �G���X�g
+    private readonly List<EnemyAIBase> enemyList = new List<EnemyAIBase>();
+
+    // 㩃��X�g
+    private readonly List<TrapBaseSequenced> trapList = new List<TrapBaseSequenced>();
+
+    [Header("㩂̎��s�e���|")]
+    [SerializeField] private float trapStepDelay = 0.05f;
+    [SerializeField] private float enemyToTrapDelay = 0.15f;
+    [SerializeField] private float afterTrapsDelay = 0.20f;
+
+    private bool _advancing = false;
+
+    // ����J�E���g�iPlayer�^�[���J�n��+1�j
+    private int _cycleIndex = 1;
+    private bool _firstPlayerBannerShown = false;
+
+    // �C�ӂ̊O���ʒm
+    public event System.Action OnRoundAdvanced;
+
+    // GameOver
+    private bool isGameOver = false;
+    public bool IsGameOver() => isGameOver;
+
+    private void Awake()
+    {
+        if (Instance == null) Instance = this;
+        else Destroy(gameObject);
+    }
+
+    void Start()
+    {
+        currentHP = maxHP;
+        UpdateHPUI();
+
+        if (gameOverPanel != null) gameOverPanel.SetActive(false);
+
+        // �ŏ��� Player �^�[������
+        StartCoroutine(SwitchPhase(TurnState.Player_Turn));
+    }
+
+    private void Update()
+    {
+        if (isGameOver && Input.GetKeyDown(KeyCode.R))
+        {
+            Retry();
+        }
+    }
+
+    /// <summary>
+    /// �v���C���[���s���iMove/Action�j��������Ă΂��
+    /// </summary>
+    public void EndPlayerTurn()
+    {
+        if (_advancing || isGameOver) return;
+        StartCoroutine(SwitchPhase(TurnState.Enemy_Turn));
+    }
+
+    private IEnumerator SwitchPhase(TurnState next)
+    {
+        if (_advancing || isGameOver) yield break;
+        _advancing = true;
+        inputLocked = true;
+
+        // �o�i�[�\��
+        if (turnBanner != null)
+        {
+            if (next == TurnState.Player_Turn)
+            {
+                if (_firstPlayerBannerShown) _cycleIndex++;
+                else _firstPlayerBannerShown = true;
+
+                yield return turnBanner.ShowPlayer(_cycleIndex);
+            }
+            else if (next == TurnState.Enemy_Turn)
+            {
+                yield return turnBanner.ShowEnemy(_cycleIndex);
+            }
+        }
+        else
+        {
+            yield return new WaitForSeconds(0.05f);
+        }
+
+        if (isGameOver) { _advancing = false; yield break; }
+
+        currentState = next;
+
+        // ===== Interval: �t�F�[�Y�J�n����㩂̎c�^�[����i�߂� =====
+        AdvanceTrapsForPhase(next);
+
+        if (next == TurnState.Player_Turn)
+        {
+            OnRoundAdvanced?.Invoke();
+            AttackTileDirector.Instance?.RefreshAll();
+            inputLocked = false;
+        }
+        else if (next == TurnState.Enemy_Turn)
+        {
+            StartCoroutine(HandleEnemyTurn());
+        }
+
+        _advancing = false;
+    }
+
+    // Interval �J�E���g�_�E��
+    private void AdvanceTrapsForPhase(TurnState phase)
+    {
+        if (trapList.Count == 0) return;
+
+        var snapshot = new List<TrapBaseSequenced>(trapList);
+        foreach (var trap in snapshot)
+        {
+            if (trap == null) continue;
+            trap.OnTurnAdvanced(phase);
+        }
+
+        AttackTileDirector.Instance?.RefreshTrapsOnly();
+    }
+
+    private IEnumerator HandleEnemyTurn()
+    {
+        inputLocked = true;
+
+        if (isGameOver) yield break;
+
+        if (enemyList.Count == 0)
+        {
+            if (enemyToTrapDelay > 0f) yield return new WaitForSeconds(enemyToTrapDelay);
+
+            AttackTileDirector.Instance?.RefreshTrapsOnly();
+
+            yield return HandleTrapsAfterEnemies();
+
+            if (afterTrapsDelay > 0f) yield return new WaitForSeconds(afterTrapsDelay);
+
+            if (!isGameOver) yield return SwitchPhase(TurnState.Player_Turn);
+            yield break;
+        }
+
+        // �GAI����Ɏ��s
+        foreach (EnemyAIBase ai in new List<EnemyAIBase>(enemyList))
+        {
+            if (isGameOver) break;
+            if (ai != null)
+            {
+                yield return StartCoroutine(ai.TryMoveTowardPlayer());
+                AttackTileDirector.Instance?.RefreshEnemyOnly();
+            }
+        }
+
+        if (isGameOver) yield break;
+
+        if (enemyToTrapDelay > 0f) yield return new WaitForSeconds(enemyToTrapDelay);
+
+        AttackTileDirector.Instance?.RefreshTrapsOnly();
+
+        yield return HandleTrapsAfterEnemies();
+
+        if (afterTrapsDelay > 0f) yield return new WaitForSeconds(afterTrapsDelay);
+
+        if (!isGameOver) yield return SwitchPhase(TurnState.Player_Turn);
+    }
+
+    // 㩂̏������s
+    private IEnumerator HandleTrapsAfterEnemies()
+    {
+        if (trapList.Count == 0) yield break;
+
+        var snapshot = new List<TrapBaseSequenced>(trapList);
+        foreach (var trap in snapshot)
+        {
+            if (isGameOver) yield break;
+            if (trap == null) continue;
+
+            if (trap.ShouldActOnPhase(TurnState.Enemy_Turn) && trap.IsReadyToAct())
+            {
+                yield return trap.Act(TurnState.Enemy_Turn);
+
+                AttackTileDirector.Instance?.RefreshTrapsOnly();
+
+                if (trapStepDelay > 0f)
+                    yield return new WaitForSeconds(trapStepDelay);
+            }
+        }
+    }
+
+    public void TakeDamage(int damage)
+    {
+        if (isGameOver) return;
+
+        currentHP = Mathf.Max(currentHP - damage, 0);
+        UpdateHPUI();
+
+        var effect = FindObjectOfType<PlayerDamageEffect>();
+        if (effect != null) effect.TakeDamageEffect();
+
+        if (audioSource != null && damageSE != null)
+            audioSource.PlayOneShot(damageSE);
+
+        if (currentHP <= 0)
+        {
+            StartCoroutine(GameOverRoutine());
+        }
+    }
+
+    public void Heal(int amount)
+    {
+        if (isGameOver) return;
+        currentHP = Mathf.Min(currentHP + amount, maxHP);
+        UpdateHPUI();
+    }
+
+    private void UpdateHPUI()
+    {
+        if (hpHud != null) hpHud.Refresh(currentHP, maxHP);
+    }
+
+    public void RegisterEnemy(EnemyAIBase enemy)
+    {
+        if (!enemyList.Contains(enemy)) enemyList.Add(enemy);
+    }
+
+    public void UnregisterEnemy(EnemyAIBase enemy)
+    {
+        if (enemyList.Contains(enemy)) enemyList.Remove(enemy);
+    }
+
+    public List<EnemyAIBase> GetEnemyList() => enemyList;
+
+    // 㩂̓o�^API
+    public void RegisterTrap(TrapBaseSequenced t)
+    {
+        if (t != null && !trapList.Contains(t)) trapList.Add(t);
+    }
+
+    public void UnregisterTrap(TrapBaseSequenced t)
+    {
+        if (t != null) trapList.Remove(t);
+    }
+
+    private IEnumerator GameOverRoutine()
+    {
+        if (isGameOver) yield break;
+        isGameOver = true;
+        inputLocked = true;
+
+        var player = GameObject.FindWithTag("Player");
+        if (player)
+        {
+            var anim = player.GetComponent<Animator>();
+            if (anim && HasAnimatorParam(anim, "Die"))
+                anim.SetTrigger("Die");
+        }
+
+        yield return new WaitForSecondsRealtime(0.8f);
+
+        Time.timeScale = 0f;
+
+        if (gameOverPanel != null) gameOverPanel.SetActive(true);
+    }
+
+    private bool HasAnimatorParam(Animator animator, string name)
+    {
+        foreach (var p in animator.parameters)
+            if (p.name == name) return true;
+        return false;
+    }
+
+    public void Retry()
+    {
+        Time.timeScale = 1f;
+        var idx = SceneManager.GetActiveScene().buildIndex;
+        SceneManager.LoadScene(idx);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\GridCameraController.cs ===
+
+using UnityEngine;
+using System.Collections;
+
+[RequireComponent(typeof(Camera))]
+public class GridCameraController : MonoBehaviour
+{
+    [Header("�Ǐ]�ݒ�")]
+    public Transform target;            // �v���C���[������蓖��
+    public bool followEnabled = true;   // �Ǐ]ON/OFF�ؑ�
+
+    [Header("�Y�[���ݒ�")]
+    public float zoomStep = 2f;         // �Y�[���̒P��
+    public float minSize = 3f;          // �ŏ��T�C�Y
+    public float maxSize = 15f;         // �ő�T�C�Y
+
+    private Camera cam;
+    private Vector3 shakeOffset = Vector3.zero;
+
+    private void Awake()
+    {
+        cam = GetComponent<Camera>();
+    }
+
+    private void LateUpdate()
+    {
+        if (target != null && followEnabled)
+        {
+            Vector3 pos = target.position + shakeOffset;
+            pos.z = transform.position.z; // �J����Z�͌Œ�
+            transform.position = pos;
+        }
+    }
+
+    private void Update()
+    {
+        // �}�E�X�z�C�[���ŃY�[��
+        float scroll = Input.GetAxis("Mouse ScrollWheel");
+        if (Mathf.Abs(scroll) > 0.01f)
+        {
+            float newSize = Mathf.Clamp(cam.orthographicSize - scroll * zoomStep, minSize, maxSize);
+            cam.orthographicSize = newSize;
+        }
+    }
+
+    // ===== �V�F�C�N�@�\ =====
+    public void Shake(float duration, float magnitude)
+    {
+        StartCoroutine(DoShake(duration, magnitude));
+    }
+
+    private IEnumerator DoShake(float duration, float magnitude)
+    {
+        float elapsed = 0f;
+        while (elapsed < duration)
+        {
+            shakeOffset = new Vector3(
+                Random.Range(-1f, 1f) * magnitude,
+                Random.Range(-1f, 1f) * magnitude,
+                0f
+            );
+            elapsed += Time.deltaTime;
+            yield return null;
+        }
+        shakeOffset = Vector3.zero;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\HPHud.cs ===
+
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+
+public class HPHud : MonoBehaviour
+{
+    [Header("���ׂ��")]
+    public RectTransform container;      // �� HPBar ���g����蓖��
+    [Header("1���̃v���n�u")]
+    public GameObject iconPrefab;        // �� HPIcon.prefab
+
+    [Header("�\���I�v�V����")]
+    public bool showEmptyToMax = false;  // true: �ő�l�܂ŋ�A�C�R������ׂ�
+    public Sprite emptyIconSprite;       // ��\���p�i�C�ӁF���ݒ�Ȃ��\���j
+
+    private readonly List<Image> pool = new List<Image>();
+
+    public void Refresh(int current, int max)
+    {
+        if (container == null || iconPrefab == null) return;
+        if (current < 0) current = 0;
+        if (max < 0) max = 0;
+        int need = showEmptyToMax ? max : current;
+
+        // �v�[����[
+        while (pool.Count < need)
+        {
+            var go = Instantiate(iconPrefab, container);
+            var img = go.GetComponent<Image>();
+            pool.Add(img);
+        }
+
+        // �K�v�������L����
+        for (int i = 0; i < pool.Count; i++)
+        {
+            bool active = i < need;
+            if (pool[i].gameObject.activeSelf != active)
+                pool[i].gameObject.SetActive(active);
+        }
+
+        // �����ڍX�V
+        for (int i = 0; i < need; i++)
+        {
+            var img = pool[i];
+
+            if (showEmptyToMax && i >= current)
+            {
+                // ��A�C�R���i�ő�l�܂ŕ��ׂ�ꍇ�j
+                if (emptyIconSprite != null)
+                    img.sprite = emptyIconSprite;
+                img.color = Color.white; // ��A�C�R���͌��F�̂܂�
+            }
+            else
+            {
+                // ����HP���͖��^���A�C�R��
+                // ���^���� prefab �̌����ڂ��̂܂܁i�F�ς��s�v�j
+                // ��F�F�ŏo�������Ȃ� img.color = new Color(1f, 0f, 0f, 1f);
+            }
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\MaskAutoExpand.cs ===
+
+using System.Collections;
+using UnityEngine;
+using UnityEngine.Events;
+
+[DisallowMultipleComponent]
+public class MaskAutoExpand : MonoBehaviour
+{
+    [Header("Expand")]
+    public float duration = 0.3f;
+    public float targetScale = 1f;
+    public bool startFromZero = true;
+    public bool useUnscaledTime = false;
+    public AnimationCurve curve = AnimationCurve.EaseInOut(0, 0, 1, 1);
+
+    [Header("Event")]
+    public UnityEvent OnFinished;
+
+    void OnEnable()
+    {
+        if (startFromZero) transform.localScale = Vector3.zero;
+        StartCoroutine(CoExpand());
+    }
+
+    IEnumerator CoExpand()
+    {
+        Vector3 start = transform.localScale;
+        Vector3 goal = Vector3.one * targetScale;
+        float t = 0f;
+
+        while (t < duration)
+        {
+            t += useUnscaledTime ? Time.unscaledDeltaTime : Time.deltaTime;
+            float u = Mathf.Clamp01(t / duration);
+            float k = curve != null ? curve.Evaluate(u) : u;
+            transform.localScale = Vector3.LerpUnclamped(start, goal, k);
+            yield return null;
+        }
+
+        transform.localScale = goal;
+        OnFinished?.Invoke();
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\Player.cs ===
+
+using UnityEngine;
+using System.Collections;
+using UnityEngine.Tilemaps;
+
+public class PlayerMover : MonoBehaviour
+{
+    public float moveTime = 0.1f;
+    public float turnDelay = 0.2f;
+
+    private bool isMoving = false;
+    private Vector3 targetPos;
+
+    public Tilemap tilemap;
+    public LayerMask obstacleLayer;    // ��/�i���֎~��
+    public LayerMask attackableLayer;  // �U���Ώ�
+
+    [Header("�U���ݒ�")]
+    public int attackPower = 3;
+
+    [Header("�T�E���h�ݒ�")]
+    public AudioSource audioSource;
+    public AudioClip attackSE;
+    public AudioClip footstepSE;
+
+    private Animator animator;
+    private bool actionLocked = false;
+
+    void Start()
+    {
+        animator = GetComponent<Animator>();
+    }
+
+    void Update()
+    {
+        if (GameManager.Instance == null) return;
+        if (GameManager.Instance.inputLocked) return;
+        if (GameManager.Instance.currentState != TurnState.Player_Turn) return;
+        if (tilemap == null) return;
+        if (isMoving || actionLocked) return;
+
+        if (Input.GetMouseButtonDown(0))
+        {
+            var cam = Camera.main;
+            if (cam == null) return;
+
+            Vector3 mp = Input.mousePosition;
+            mp.z = Mathf.Abs(cam.transform.position.z);   // �� �J��������̋�����ݒ�
+            Vector3 mouseWorld = cam.ScreenToWorldPoint(mp);
+            mouseWorld.z = 0f;
+
+            Vector3Int clickedCell = tilemap.WorldToCell(mouseWorld);
+            Vector3Int currentCell = tilemap.WorldToCell(transform.position);
+            Vector3Int diff = clickedCell - currentCell;
+
+            // ���Z���N���b�N �� ���̏�Ń^�[���I��
+            if (diff == Vector3Int.zero)
+            {
+                GameManager.Instance.EndPlayerTurn();
+                return;
+            }
+
+            // 1�}�X�ȓ�̂ݑΏ�
+            bool isNeighbor = (Mathf.Abs(diff.x) <= 1 && Mathf.Abs(diff.y) <= 1);
+            if (!isNeighbor)
+            {
+                Debug.Log("�������ĉ���ł��Ȃ�");
+                return;
+            }
+
+            Vector3 cellCenter = tilemap.GetCellCenterWorld(clickedCell);
+
+            // ===== �U���D�� =====
+            Collider2D hitAttackable = Physics2D.OverlapBox(cellCenter, new Vector2(0.9f, 0.9f), 0f, attackableLayer);
+            if (hitAttackable != null)
+            {
+                StartCoroutine(PerformAttack(clickedCell));
+                return;
+            }
+
+            // ===== �ړ��i������ & ��Q���Ȃ��j =====
+            if (tilemap.HasTile(clickedCell))
+            {
+                bool blocked = Physics2D.OverlapBox(cellCenter, new Vector2(0.9f, 0.9f), 0f, obstacleLayer);
+                if (!blocked)
+                {
+                    StartCoroutine(MoveToPosition(cellCenter));
+                    return;
+                }
+
+                Debug.Log("���̃}�X�ɏ�Q�������邽�߈ړ��s��");
+                return;
+            }
+
+            Debug.Log("���̃}�X�ɂ͈ړ���U����ł��Ȃ�");
+        }
+    }
+
+    private IEnumerator MoveToPosition(Vector3 target)
+    {
+        isMoving = true;
+        Vector3 start = transform.position;
+        targetPos = target; // Gizmos �\���p
+        float elapsed = 0;
+
+        while (elapsed < moveTime)
+        {
+            transform.position = Vector3.Lerp(start, target, elapsed / moveTime);
+            elapsed += Time.deltaTime;
+            yield return null;
+        }
+
+        transform.position = target;
+        isMoving = false;
+
+        if (audioSource != null && footstepSE != null)
+        {
+            StartCoroutine(PlayFootstepSounds());
+        }
+
+        // �ړ�������������^�[���I��
+        GameManager.Instance.EndPlayerTurn();
+    }
+
+    private IEnumerator PlayFootstepSounds()
+    {
+        int stepCount = 2;
+        float interval = 0.3f;
+
+        for (int i = 0; i < stepCount; i++)
+        {
+            audioSource.PlayOneShot(footstepSE);
+            yield return new WaitForSeconds(interval);
+        }
+    }
+
+    private void ResetToIdleWithDelay()
+    {
+        if (animator != null) animator.SetTrigger("ToIdle");
+        StartCoroutine(DelayEndTurn());
+    }
+
+    private IEnumerator DelayEndTurn()
+    {
+        yield return new WaitForSeconds(turnDelay);
+        GameManager.Instance.EndPlayerTurn();
+    }
+
+    private void OnDrawGizmosSelected()
+    {
+        Gizmos.color = Color.red;
+        Gizmos.DrawWireCube(targetPos, new Vector2(0.9f, 0.9f));
+    }
+
+    private IEnumerator PerformAttack(Vector3Int clickedCell)
+    {
+        actionLocked = true;
+
+        var camCtrl = FindObjectOfType<GridCameraController>();
+        bool camFound = camCtrl != null;
+        if (camFound) camCtrl.followEnabled = false;
+
+        try
+        {
+            Vector3 attackTarget = tilemap.GetCellCenterWorld(clickedCell);
+
+            Collider2D hit = Physics2D.OverlapBox(
+                attackTarget,
+                new Vector2(0.9f, 0.9f),
+                0f,
+                attackableLayer
+            );
+
+            var lunge = GetComponent<PlayerAttackLunge>();
+            if (hit != null && lunge != null)
+            {
+                yield return StartCoroutine(lunge.PlayTowardCell(clickedCell, tilemap));
+            }
+
+            if (hit != null && audioSource != null && attackSE != null)
+            {
+                audioSource.PlayOneShot(attackSE);
+            }
+
+            if (hit != null)
+            {
+                if (hit.TryGetComponent<EnemyHealth>(out var enemy))
+                {
+                    enemy.TakeDamage(attackPower);
+                    Debug.Log($"�G��{attackPower}�_���[�W��^����");
+                }
+                else if (hit.TryGetComponent<TrapBaseSequenced>(out var trap))
+                {
+                    trap.ForceArm();
+                    Debug.Log("㩂�U�����ċN���������I");
+                }
+            }
+            else
+            {
+                Debug.Log("�U���͈͂ɉ���Ȃ�");
+            }
+        }
+        finally
+        {
+            if (camFound) camCtrl.followEnabled = true;
+            ResetToIdleWithDelay();
+            actionLocked = false;
+        }
+    }
+
+    public string GetCurrentActionMode()
+    {
+        return "Attack";
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\PlayerAttackLunge.cs ===
+
+using System.Collections;
+using UnityEngine;
+using UnityEngine.Tilemaps;
+
+[DisallowMultipleComponent]
+public class PlayerAttackLunge : MonoBehaviour
+{
+    [Header("Lunge Settings")]
+    [Tooltip("�ő�S�i�����i���[���h���W�j�B����32px�Ȃ� 0.12?0.22 ���炢�����R")]
+    public float maxForwardDistance = 0.18f;
+
+    [Tooltip("�S�̂̍Đ����ԁi�s���Ė߂�܂Łj")]
+    public float totalDuration = 0.12f;
+
+    [Tooltip("�����̃C�[�W���O�i0��1��0 �́g�R�h�`��z��j")]
+    public AnimationCurve ease = AnimationCurve.EaseInOut(0, 0, 1, 1);
+
+    [Header("Options")]
+    [Tooltip("���o���� GameManager �̓��͂���b�N����")]
+    public bool lockInputDuring = true;
+
+    [Tooltip("�J�n/�I���ňʒu������ɕ␳����i�o�H�덷�h�~�j")]
+    public bool hardSnapFix = true;
+
+    [Header("SFX (optional)")]
+    public AudioSource audioSource;
+    public AudioClip whooshSE;
+
+    /// <summary>
+    /// �^�[�Q�b�g�̃��[���h���W�֌����Čy���O�i���Ė߂�i�̓����蕗�j
+    /// </summary>
+    public IEnumerator PlayTowardWorld(Vector3 targetWorld)
+    {
+        // ���̓��b�N
+        bool didLock = false;
+        if (lockInputDuring && GameManager.Instance != null && !GameManager.Instance.inputLocked)
+        {
+            GameManager.Instance.GetType(); // �Q�Ɗm�ۂ����i�x���}���j
+            GameManager.Instance.GetType(); // no-op
+            GameManager.Instance.GetType();
+            GameManager.Instance.GetType();
+            GameManager.Instance.GetType();
+            // ���ۂɃ��b�N�iGameManager��setter���Ȃ��̂ŕێ�I�Ƀt���O�����j
+            // �������b�NAPI�������z��Ȃ̂ŁA�O���� inputLocked ����邾���O��
+        }
+
+        Vector3 start = transform.position;
+
+        // �i�s����
+        Vector2 dir = (targetWorld - start);
+        if (dir.sqrMagnitude > 0.0001f) dir.Normalize();
+        else dir = Vector2.zero;
+
+        Vector3 forward = (Vector3)(dir * maxForwardDistance);
+
+        // SE
+        if (audioSource && whooshSE) audioSource.PlayOneShot(whooshSE);
+
+        // 0��1��0 �́u�s���Ė߂�v�J�[�u�ŕ��
+        float t = 0f;
+        float dur = Mathf.Max(0.0001f, totalDuration);
+        while (t < dur)
+        {
+            float u = t / dur;                 // 0..1
+            float w = Wave01(u);               // 0��1��0
+            float e = ease.Evaluate(w);        // �D���Ȍ`�ɘc�߂�i������ΐ��`�����j
+
+            transform.position = start + forward * e;
+
+            t += Time.deltaTime;
+            yield return null;
+        }
+
+        if (hardSnapFix) transform.position = start;
+
+        // ���̓��b�N����i����̓��b�N��g�ǂނ����h�z��Ȃ̂ŉ�����Ȃ��j
+        if (didLock)
+        {
+            // GameManager �ɖ����I�� Unlock API ������Ȃ炱���ŌĂ�
+        }
+    }
+
+    /// <summary>
+    /// �^�C�����W�̃Z���֌����đO�i�iTilemap��j
+    /// </summary>
+    public IEnumerator PlayTowardCell(Vector3Int targetCell, Tilemap referenceTilemap)
+    {
+        Vector3 targetWorld = referenceTilemap.GetCellCenterWorld(targetCell);
+        return PlayTowardWorld(targetWorld);
+    }
+
+    // 0��1��0 �̊ȈՃg���C�A���O���g�iease�J�[�u�Ŋۂ߂�O�i�j
+    private static float Wave01(float u)
+    {
+        u = Mathf.Clamp01(u);
+        // 0..0.5 �� 0��1, 0.5..1 �� 1��0
+        return (u <= 0.5f) ? (u * 2f) : (2f - u * 2f);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\PlayerCellMaskFollower.cs ===
+
+using UnityEngine;
+using UnityEngine.Tilemaps;
+
+/// <summary>
+/// �v���C���[�̌��݃Z���́u�Z�����S�v�� SpriteMask ��X�i�b�v�Ǐ]������B
+/// �����W�ȂǂŃv���C���[�����S����O��Ă���Ԃ͈ړ����Ȃ����߁A�׃}�X�������Ȃ��B
+/// </summary>
+[ExecuteAlways]
+public class PlayerCellMaskFollower : MonoBehaviour
+{
+    [Header("�Q��")]
+    public Transform player;        // �v���C���[��Transform�i�q�ɂ��Ȃ��j
+    public Tilemap floorTilemap;    // ��Tilemap�iWorld<->Cell�ϊ��Ɏg�p�j
+
+    [Header("����")]
+    [Tooltip("�v���C���[���Z�����S�ɏ\���߂����̂݃X�i�b�v����臒l�i���[���h�����j")]
+    public float snapEpsilon = 0.02f;
+
+    [Tooltip("�G�f�B�^��~�����Ɍ��݃Z�����S�ɍ��킹�����ꍇON�iScene��ňʒu�m�F�p�j")]
+    public bool snapInEditMode = true;
+
+    // ���߂ŃX�i�b�v�����ʒu�i�C�Ӂj
+    private Vector3 _lastSnapped;
+
+    private void Reset()
+    {
+        // ��������
+        if (player == null)
+        {
+            var p = GameObject.FindGameObjectWithTag("Player");
+            if (p) player = p.transform;
+        }
+        if (floorTilemap == null)
+        {
+            var tm = FindObjectOfType<Tilemap>();
+            if (tm) floorTilemap = tm;
+        }
+    }
+
+    private void Update()
+    {
+#if UNITY_EDITOR
+        if (!Application.isPlaying && !snapInEditMode) return;
+#endif
+        if (player == null || floorTilemap == null) return;
+
+        // �v���C���[�ʒu���猻�݃Z���ƁA���̒��S���[���h���W����߂�
+        Vector3Int cell = floorTilemap.WorldToCell(player.position);
+        Vector3 cellCenter = floorTilemap.GetCellCenterWorld(cell);
+
+        // �v���C���[���Z�����S�ɏ\���߂��������X�i�b�v
+        float dist = Vector3.Distance(player.position, cellCenter);
+        if (dist <= snapEpsilon)
+        {
+            if (_lastSnapped != cellCenter)
+            {
+                transform.position = cellCenter;
+                _lastSnapped = cellCenter;
+            }
+        }
+        // �߂��Ȃ��Ԃ́u�O��̃X�i�b�v�ʒu�v�ɗ��܂�i�������W���͌Œ�j
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\PlayerDamageEffect.cs ===
+
+using UnityEngine;
+using System.Collections;
+
+public class PlayerDamageEffect : MonoBehaviour
+{
+    [Header("���G���Ԑݒ�")]
+    public float invincibleTime = 1.0f; // �_���[�W��̖��G����
+    public float flashInterval = 0.1f;  // �_�ŊԊu
+
+    private SpriteRenderer spriteRenderer;
+    private bool isInvincible = false;
+
+    private void Start()
+    {
+        spriteRenderer = GetComponent<SpriteRenderer>();
+    }
+
+    public void TakeDamageEffect()
+    {
+        if (!isInvincible)
+        {
+            StartCoroutine(DamageFlash());
+
+            // �J�����V�F�C�N�iGridCameraController��g�p�j
+            GridCameraController cam = FindObjectOfType<GridCameraController>();
+            if (cam != null)
+            {
+                cam.Shake(0.2f, 0.15f); // 0.2�b�ԁA0.15�̋����ŗh�炷
+            }
+        }
+    }
+
+    private IEnumerator DamageFlash()
+    {
+        isInvincible = true;
+
+        float elapsed = 0f;
+        while (elapsed < invincibleTime)
+        {
+            spriteRenderer.enabled = !spriteRenderer.enabled; // ON/OFF�؂�ւ�
+            yield return new WaitForSeconds(flashInterval);
+            elapsed += flashInterval;
+        }
+
+        spriteRenderer.enabled = true; // �Ō�͕\����Ԃɖ߂�
+        isInvincible = false;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\TargetCursorTiles.cs ===
+
+using UnityEngine;
+using UnityEngine.Tilemaps;
+
+public class TargetCursorTiles : MonoBehaviour
+{
+    [Header("Tilemaps")]
+    public Tilemap floorTilemap;
+    public Tilemap wallTilemap;        // �C��
+    public Tilemap overlayTilemap;     // �\���p�I�[�o�[���C
+
+    [Header("Layers")]
+    public LayerMask obstacleLayer;
+    public LayerMask attackableLayer;
+
+    [Header("Cursor Tiles")]
+    public TileBase moveTile;          // ���՘g�i�ҋ@�����j
+    public TileBase attackTile;        // ���g
+    public TileBase blockedTile;       // �s�p�i���w��Ȃ��\���Ɂj
+
+    [Header("�\���|���V�[�i�J�[�\���̉�/�s�j")]
+    public bool hideBlocked = true;
+    public bool showDuringPlayerTurn = true;
+    public bool showDuringEnemyTurn = true;
+    public bool showDuringOtherStates = false;
+    public bool hideWhenInputLocked = false;
+
+    [Header("����")]
+    public bool onlyAdjacent = true;
+    public Vector2 cellBoxSize = new Vector2(0.9f, 0.9f);
+
+    [Header("�`�揇�i�G/㩂��O�Ɂj")]
+    public string sortingLayerName = "Overlays";
+    public int sortingOrder = 500;
+
+    [Header("Click Flash (Player_Turn���̂ݔ���)")]
+    public ClickFlashFX clickFXPrefab;
+    public bool spawnFlashOnBlocked = false;
+    public Color moveFlashColor = new Color(0.2f, 0.9f, 1f, 1f);
+    public Color attackFlashColor = new Color(1f, 0.25f, 0.2f, 1f);
+    public Color blockedFlashColor = new Color(0.8f, 0.2f, 0.2f, 1f);
+
+    [Header("Player Animator Hook")]
+    public Animator playerAnimator;                 // ���ݒ�Ȃ� Awake �Ŏ����擾
+    public string attackTriggerName = "ToAttack";   // Animator �� Trigger ��
+    public string idleTriggerName = "ToIdle";
+
+    [Header("�A�j���Đ��������^�[��")]
+    public bool animateDuringPlayerTurn = true;     // �� �ǉ�
+    public bool animateDuringEnemyTurn = true;     // �� �ǉ�
+    public bool animateDuringOtherStates = false;   // �� �ǉ�
+
+    private Vector3Int _lastCell;
+    private TileBase _lastTile;
+    private Camera _cam;
+
+    private bool _hoverIsAttack = false;
+    private int _toAttackID, _toIdleID;
+
+    void Awake()
+    {
+        _cam = Camera.main;
+
+        if (overlayTilemap != null)
+        {
+            var r = overlayTilemap.GetComponent<TilemapRenderer>();
+            if (r != null)
+            {
+                r.sortingLayerName = sortingLayerName;
+                r.sortingOrder = sortingOrder;
+            }
+        }
+
+        _toAttackID = Animator.StringToHash(attackTriggerName);
+        _toIdleID = Animator.StringToHash(idleTriggerName);
+
+        // ���ݒ�Ȃ�v���C���[����E��
+        if (playerAnimator == null)
+        {
+            var player = GameObject.FindWithTag("Player");
+            if (player) playerAnimator = player.GetComponent<Animator>();
+        }
+    }
+
+    void OnDisable() => ClearLast();
+
+    void Update()
+    {
+        if (floorTilemap == null || overlayTilemap == null)
+        {
+            ClearLast();
+            return;
+        }
+        if (_cam == null) _cam = Camera.main;
+        if (_cam == null) { ClearLast(); return; }
+
+        // �J�[�\�����̔���
+        if (!ShouldShowCursor())
+        {
+            ClearLast();
+            // �J�[�\����\�����̓A�^�b�N�\������
+            HandleHoverAnimation(isAttack: false, forceIdle: true);
+            return;
+        }
+
+        // �}�E�X �� ���[���h �� �Z��
+        Vector3 mp = Input.mousePosition;
+        mp.z = Mathf.Abs(_cam.transform.position.z);
+        Vector3 world = _cam.ScreenToWorldPoint(mp); world.z = 0f;
+        Vector3Int cell = floorTilemap.WorldToCell(world);
+        Vector3 center = floorTilemap.GetCellCenterWorld(cell);
+
+        var tile = DecideTile(cell);
+
+        if (cell != _lastCell || tile != _lastTile)
+            Apply(cell, tile);
+
+        // �� Attack�^�C����z�o�[���ɃA�j���ؑցi�����ꂽ�^�[���̂݁j
+        bool isAttackTile = (tile == attackTile);
+        HandleHoverAnimation(isAttackTile);
+
+        // �N���b�N�E�t���b�V���iPlayer_Turn ����j
+        if (Input.GetMouseButtonDown(0) && clickFXPrefab != null && CanSpawnClickFlash())
+        {
+            bool isMove = tile == moveTile;
+            bool isAttack = tile == attackTile;
+            bool isBlocked = (!isMove && !isAttack);
+
+            if (!isBlocked || (isBlocked && spawnFlashOnBlocked))
+            {
+                var fx = Instantiate(clickFXPrefab, center, Quaternion.identity, overlayTilemap.transform);
+                var tint = isAttack ? attackFlashColor : (isMove ? moveFlashColor : blockedFlashColor);
+                fx.Play(center, tint, sortingLayerName, sortingOrder + 1);
+            }
+        }
+    }
+
+    // ===== �J�[�\���\���̉� =====
+    bool ShouldShowCursor()
+    {
+        var gm = GameManager.Instance;
+        if (gm == null) return true;
+        if (hideWhenInputLocked && gm.inputLocked) return false;
+
+        switch (gm.currentState)
+        {
+            case TurnState.Player_Turn: return showDuringPlayerTurn;
+            case TurnState.Enemy_Turn: return showDuringEnemyTurn;
+            default: return showDuringOtherStates;
+        }
+    }
+
+    // ===== �t���b�V�����΂̉ہiPlayer_Turn ����j =====
+    bool CanSpawnClickFlash()
+    {
+        var gm = GameManager.Instance;
+        if (gm == null) return false;
+        if (hideWhenInputLocked && gm.inputLocked) return false;
+        return gm.currentState == TurnState.Player_Turn;
+    }
+
+    // ===== �A�j������i�^�[���ʋ��j =====
+    void HandleHoverAnimation(bool isAttack, bool forceIdle = false)
+    {
+        bool allow = true;
+        var gm = GameManager.Instance;
+
+        if (gm != null)
+        {
+            if (hideWhenInputLocked && gm.inputLocked) allow = false;
+            if (allow)
+            {
+                switch (gm.currentState)
+                {
+                    case TurnState.Player_Turn: allow = animateDuringPlayerTurn; break;
+                    case TurnState.Enemy_Turn: allow = animateDuringEnemyTurn; break;
+                    default: allow = animateDuringOtherStates; break;
+                }
+            }
+        }
+
+        if (!allow) isAttack = false;
+
+        if (playerAnimator == null) { _hoverIsAttack = isAttack; return; }
+
+        if (forceIdle)
+        {
+            if (_hoverIsAttack)
+            {
+                playerAnimator.ResetTrigger(_toAttackID);
+                if (!string.IsNullOrEmpty(idleTriggerName)) playerAnimator.SetTrigger(_toIdleID);
+            }
+            _hoverIsAttack = false;
+            return;
+        }
+
+        if (isAttack == _hoverIsAttack) return;
+
+        if (isAttack)
+        {
+            playerAnimator.ResetTrigger(_toIdleID);
+            if (!string.IsNullOrEmpty(attackTriggerName)) playerAnimator.SetTrigger(_toAttackID);
+        }
+        else
+        {
+            playerAnimator.ResetTrigger(_toAttackID);
+            if (!string.IsNullOrEmpty(idleTriggerName)) playerAnimator.SetTrigger(_toIdleID);
+        }
+
+        _hoverIsAttack = isAttack;
+    }
+
+    // ===== �^�C���K�p/��� =====
+    void Apply(Vector3Int cell, TileBase tile)
+    {
+        if (_lastTile != null) overlayTilemap.SetTile(_lastCell, null);
+        if (tile != null || !hideBlocked)
+            overlayTilemap.SetTile(cell, tile ?? blockedTile);
+        _lastCell = cell;
+        _lastTile = tile;
+    }
+
+    void ClearLast()
+    {
+        if (_lastTile != null && overlayTilemap != null)
+            overlayTilemap.SetTile(_lastCell, null);
+        _lastTile = null;
+    }
+
+    // ===== ���� =====
+    TileBase DecideTile(Vector3Int cell)
+    {
+        var player = GameObject.FindWithTag("Player");
+        if (player == null) return hideBlocked ? null : blockedTile;
+
+        Vector3Int pc = floorTilemap.WorldToCell(player.transform.position);
+        int dx = Mathf.Abs(cell.x - pc.x);
+        int dy = Mathf.Abs(cell.y - pc.y);
+
+        // ���Z�����ҋ@�� moveTile
+        if (dx == 0 && dy == 0) return moveTile;
+
+        if (onlyAdjacent && (dx > 1 || dy > 1))
+            return hideBlocked ? null : blockedTile;
+
+        Vector3 center = floorTilemap.GetCellCenterWorld(cell);
+
+        // �U���D��
+        bool attackable = Physics2D.OverlapBox(center, cellBoxSize, 0f, attackableLayer);
+        if (attackable) return attackTile;
+
+        // �ړ��F������ && �ǂȂ� && ��Q���Ȃ�
+        bool hasFloor = floorTilemap.HasTile(cell);
+        bool isWall = (wallTilemap != null) && wallTilemap.HasTile(cell);
+        bool blocked = Physics2D.OverlapBox(center, cellBoxSize, 0f, obstacleLayer);
+
+        if (hasFloor && !isWall && !blocked) return moveTile;
+
+        return hideBlocked ? null : blockedTile;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\Trap\TrapBaseSequenced.cs ===
+
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.Tilemaps;
+
+[RequireComponent(typeof(BoxCollider2D))]
+public abstract class TrapBaseSequenced : MonoBehaviour
+{
+    [Header("Tilemaps")]
+    public Tilemap floorTilemap;
+    public Tilemap wallTilemap;
+
+    [Header("When to act")]
+    public bool actOnPlayerTurn = false;
+    public bool actOnEnemyTurn = true;
+
+    [Header("Trigger / Arming")]
+    public bool requireArmed = true;
+    public bool disarmAfterAct = true;
+
+    // �i���E�N���͎g��Ȃ����A�����v���n�u�݊��̂��ߎc�u�j
+    public string visionLayerName = "Vision";
+    public string playerVisionTag = "PlayerVision";
+    public string bulletVisionTag = "BulletVision";
+    public bool useLayerCheck = true;
+    public bool useTagCheck = true;
+
+    [Header("Attack")]
+    public int attackPower = 2;
+    public LayerMask hitLayers;                  // Enemy / Player / Bullet �Ȃ�
+    public Vector2 cellHitBox = new Vector2(0.9f, 0.9f);
+
+    [Header("Blocking")]
+    public bool stopRayOnTrap = true;
+    public LayerMask trapBlockLayer;
+
+    [Header("SFX (optional)")]
+    public AudioSource audioSource;
+    public AudioClip armSE;     // �N����
+    public AudioClip attackSE;  // ������
+
+    [Header("Pacing")]
+    public float actDuration = 0.20f;
+    public bool waitForSELength = false;
+
+    [Header("Visual Timing")]
+    [Tooltip("�N����(SE)����I����Ă���AttackTile��o��")]
+    public bool delayVisualUntilArmSE = true;
+    [Tooltip("SE�����ɉ��Z����ǂ��f�B���C(�b)")]
+    public float visualExtraDelay = 0f;
+
+    // ===== Interval�i�Z�^�[����1��j =====
+    [Header("Cycle / Interval")]
+    [Min(1), Tooltip("���^�[�����Ƃɔ��΂��邩�i1=���^�[���j")]
+    public int intervalTurns = 1;
+    [Min(0), Tooltip("���񔭉΂܂ł̑҂��^�[���i0=�����j")]
+    public int initialOffset = 0;
+
+    // ������
+    protected bool armed = false;
+    public bool IsArmed => armed;
+
+    [SerializeField] private int turnsUntilFire;   // �c�^�[���i����p�j
+    public int TurnsRemaining => turnsUntilFire;
+
+    // �N���C�x���g�i�r�W���A���p�j
+    public event System.Action<TrapBaseSequenced> OnArmed;        // Arm����
+    public event System.Action<TrapBaseSequenced> OnArmedVisual;  // SE��̉���
+
+    // �g���t�b�N
+    public virtual bool ShouldActOnPhase(TurnState phase)
+    {
+        // �� Player_Move �� Player_Turn �ɓ����ς�
+        return (phase == TurnState.Player_Turn && actOnPlayerTurn)
+            || (phase == TurnState.Enemy_Turn && actOnEnemyTurn);
+    }
+    public virtual bool IsReadyToAct() => true;
+    protected virtual void AfterAct() { }
+
+    protected virtual void Awake()
+    {
+        var box = GetComponent<BoxCollider2D>();
+        if (box)
+        {
+            box.isTrigger = true;
+            box.offset = Vector2.zero;
+            if (box.size != cellHitBox) box.size = cellHitBox;
+        }
+    }
+
+    protected virtual void Start()
+    {
+        // �Z�����S�փX�i�b�v
+        if (floorTilemap != null)
+        {
+            var c = floorTilemap.WorldToCell(transform.position);
+            transform.position = floorTilemap.GetCellCenterWorld(c);
+        }
+
+        // ����������
+        ResetCycle();
+
+        GameManager.Instance?.RegisterTrap(this);
+    }
+
+    protected virtual void OnDestroy()
+    {
+        GameManager.Instance?.UnregisterTrap(this);
+    }
+
+    // ===== Interval ������� =====
+    public void ResetCycle()
+    {
+        SetTurnsRemaining(Mathf.Max(0, initialOffset));
+    }
+
+    /// <summary>�t�F�[�Y�J�n���Ȃǂ� GameManager ����Ăԑz��B</summary>
+    public void OnTurnAdvanced(TurnState phase)
+    {
+        if (!ShouldActOnPhase(phase)) return;
+        if (turnsUntilFire > 0) SetTurnsRemaining(turnsUntilFire - 1);
+    }
+
+    private void SetTurnsRemaining(int value)
+    {
+        turnsUntilFire = Mathf.Max(0, value);
+    }
+
+    private void ReloadCycleAfterAct()
+    {
+        // interval=1 -> �҂�0�Ainterval=3 -> �҂�2
+        int wait = Mathf.Max(0, intervalTurns - 1);
+        SetTurnsRemaining(wait);
+    }
+
+    // ===== ���E�g���K�[�͍폜�i�U���ŋN���j =====
+
+    // �O���i�v���C���[�U���Ȃǁj���狭���N��
+    public void ForceArm()
+    {
+        if (armed) return;
+        Arm();
+    }
+
+    // �� Arm�FSE �� OnArmed ���� ���i�K�v�Ȃ�jSE�I����� OnArmedVisual
+    protected virtual void Arm()
+    {
+        armed = true;
+
+        if (audioSource && armSE)
+            audioSource.PlayOneShot(armSE);
+
+        OnArmed?.Invoke(this);
+
+        if (delayVisualUntilArmSE && audioSource && armSE)
+        {
+            float delay = Mathf.Max(0f, armSE.length + visualExtraDelay);
+            StartCoroutine(NotifyVisualAfter(delay));
+        }
+        else
+        {
+            OnArmedVisual?.Invoke(this);
+        }
+    }
+
+    private IEnumerator NotifyVisualAfter(float delay)
+    {
+        if (delay > 0f) yield return new WaitForSeconds(delay);
+        OnArmedVisual?.Invoke(this);
+    }
+
+    // ===== ���s���� =====
+    public virtual IEnumerator Act(TurnState phase)
+    {
+        if (!ShouldActOnPhase(phase)) yield break;
+        if (turnsUntilFire > 0) yield break;
+        if (!IsReadyToAct()) yield break;
+        if (requireArmed && !armed) yield break;
+
+        if (audioSource && attackSE) audioSource.PlayOneShot(attackSE);
+
+        DoAttack();       // �d���q�b�g�}�~��
+        AfterAct();
+
+        if (disarmAfterAct) armed = false;
+
+        // ����܂ł̑҂��^�[�����U
+        ReloadCycleAfterAct();
+
+        float wait = Mathf.Max(0f, actDuration);
+        if (waitForSELength && attackSE != null)
+            wait = Mathf.Max(wait, attackSE.length);
+
+        if (wait > 0f) yield return new WaitForSeconds(wait);
+        else yield return null;
+    }
+
+    // ===== �U���i����Act���̏d���q�b�g�}�~�j =====
+    protected void DoAttack()
+    {
+        if (floorTilemap == null || wallTilemap == null) return;
+
+        var origin = floorTilemap.WorldToCell(transform.position);
+
+        var processedBullets = new HashSet<GameObject>();
+        var processedEnemies = new HashSet<EnemyHealth>();
+        bool playerProcessed = false;
+
+        foreach (var cell in EnumerateAttackCells(origin))
+        {
+            var world = floorTilemap.GetCellCenterWorld(cell);
+            var hits = Physics2D.OverlapBoxAll(world, cellHitBox, 0f, hitLayers);
+            if (hits == null || hits.Length == 0) continue;
+
+            foreach (var h in hits)
+            {
+                if (h == null) continue;
+
+                // �e�͈�x�����j��
+                if (h.CompareTag("Bullet"))
+                {
+                    if (processedBullets.Add(h.gameObject))
+                    {
+                        Destroy(h.gameObject);
+                    }
+                    continue;
+                }
+
+                // �G�͈�x�����_���[�W
+                if (h.TryGetComponent<EnemyHealth>(out var enemy))
+                {
+                    if (processedEnemies.Add(enemy))
+                    {
+                        enemy.TakeDamage(attackPower);
+
+                        // �C�ӁF�q�b�g���o
+                        var ai = enemy.GetComponent<EnemyAIBase>();
+                        ai?.PlayDamageFlash();
+                    }
+                    continue;
+                }
+
+                // �v���C���[���x����
+                if (!playerProcessed && h.CompareTag("Player"))
+                {
+                    GameManager.Instance?.TakeDamage(attackPower);
+                    playerProcessed = true;
+                    continue;
+                }
+            }
+        }
+    }
+
+    // ===== ���i�񋓁F��/㩂ɓ�����܂Łi���������Z���͊܂߂Ȃ��j =====
+    protected IEnumerable<Vector3Int> RayCells(Vector3Int origin, Vector3Int dir)
+    {
+        var c = origin + dir;
+        while (true)
+        {
+            if (wallTilemap.HasTile(c)) yield break;     // �ǂŒ�~
+            if (!floorTilemap.HasTile(c)) yield break;   // ���͈͊O�Œ�~
+            if (stopRayOnTrap && IsTrapBlockingCell(c)) yield break; // 㩂Œ�~
+
+            yield return c;
+            c += dir;
+        }
+    }
+
+    // ���̃Z����㩂����邩�H�i�����ȊO�j
+    private bool IsTrapBlockingCell(Vector3Int cell)
+    {
+        if (trapBlockLayer.value != 0)
+        {
+            Vector3 w = floorTilemap.GetCellCenterWorld(cell);
+            var hit = Physics2D.OverlapBox(w, cellHitBox, 0f, trapBlockLayer);
+            if (hit != null)
+            {
+                var trap = hit.GetComponentInParent<TrapBaseSequenced>();
+                if (trap != null && trap != this) return true;
+            }
+            return false;
+        }
+
+        // �t�H�[���o�b�N�F�S㩑���
+        var traps = FindObjectsOfType<TrapBaseSequenced>();
+        foreach (var t in traps)
+        {
+            if (t == null || t == this) continue;
+            if (t.floorTilemap == null) continue;
+
+            var tc = t.floorTilemap.WorldToCell(t.transform.position);
+            if (tc == cell) return true;
+        }
+        return false;
+    }
+
+    // ====== �\���p�̃v���r���[ ======
+    public IEnumerable<Vector3Int> PreviewCells()
+    {
+        if (floorTilemap == null) yield break;
+        var origin = floorTilemap.WorldToCell(transform.position);
+        foreach (var c in EnumerateAttackCells(origin))
+            yield return c;
+    }
+
+    // �C�ӂ̌��_�ŊO������擾�������ꍇ�̃��b�p
+    public IEnumerable<Vector3Int> GetAttackCells(Vector3Int origin)
+    {
+        foreach (var c in EnumerateAttackCells(origin))
+            yield return c;
+    }
+
+    // ===== �e㩂���������U���p�^�[�� =====
+    protected abstract IEnumerable<Vector3Int> EnumerateAttackCells(Vector3Int origin);
+
+#if UNITY_EDITOR
+    private void OnDrawGizmosSelected()
+    {
+        if (floorTilemap == null || wallTilemap == null) return;
+        var origin = floorTilemap.WorldToCell(transform.position);
+        Gizmos.color = new Color(1f, 0.3f, 0.2f, 0.9f);
+        foreach (var c in EnumerateAttackCells(origin))
+        {
+            var w = floorTilemap.GetCellCenterWorld(c);
+            Gizmos.DrawWireCube(w, new Vector3(cellHitBox.x, cellHitBox.y, 0f));
+        }
+    }
+#endif
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\Trap\TrapRayDiagonalTrap.cs ===
+
+using System.Collections.Generic;
+using UnityEngine;
+
+public class TrapRayDiagonalTrap : TrapBaseSequenced
+{
+    protected override IEnumerable<Vector3Int> EnumerateAttackCells(Vector3Int origin)
+    {
+        foreach (var c in RayCells(origin, new Vector3Int(1, 1, 0))) yield return c;
+        foreach (var c in RayCells(origin, new Vector3Int(1, -1, 0))) yield return c;
+        foreach (var c in RayCells(origin, new Vector3Int(-1, 1, 0))) yield return c;
+        foreach (var c in RayCells(origin, new Vector3Int(-1, -1, 0))) yield return c;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\Trap\TrapRayOrthoTrap.cs ===
+
+using System.Collections.Generic;
+using UnityEngine;
+
+public class TrapRayOrthoTrap : TrapBaseSequenced
+{
+    protected override IEnumerable<Vector3Int> EnumerateAttackCells(Vector3Int origin)
+    {
+        foreach (var c in RayCells(origin, Vector3Int.up)) yield return c;
+        foreach (var c in RayCells(origin, Vector3Int.down)) yield return c;
+        foreach (var c in RayCells(origin, Vector3Int.left)) yield return c;
+        foreach (var c in RayCells(origin, Vector3Int.right)) yield return c;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\TurnBanner.cs ===
+
+using System.Collections;
+using UnityEngine;
+using TMPro;
+using UnityEngine.UI;
+
+[DisallowMultipleComponent]
+[RequireComponent(typeof(RectTransform))]
+[RequireComponent(typeof(CanvasGroup))]
+public class TurnBanner : MonoBehaviour
+{
+    [Header("Refs")]
+    public TextMeshProUGUI label;   // �����e�L�X�g�i�q���玩���擾OK�j
+    public CanvasGroup canvasGroup; // �t�F�[�h����i�e�ɕt�^�j
+    public Image backdrop;          // ����K���X�w�i�i�e or �q�A�ǂ���ł�OK�j
+
+    [Header("Text")]
+    public string playerTitle = "PLAYER TURN";
+    public string enemyTitle = "ENEMY TURN";
+    public string turnFormat = "TURN {0}";
+
+    [Header("Timings")]
+    public float fadeIn = 0.15f;
+    public float hold = 0.80f;
+    public float fadeOut = 0.20f;
+
+    [Header("Look & Feel")]
+    [Tooltip("�T�u�s�i�^�[�����j�̑��΃T�C�Y")]
+    public float sublineScale = 0.7f;
+    [Tooltip("�w�i�̃p�f�B���O�ipx�j")]
+    public Vector4 backdropPadding = new Vector4(24, 24, 24, 24); // L,T,R,B
+
+    [Header("Auto wire")]
+    public bool autoWire = true;
+
+    void Awake()
+    {
+        if (autoWire)
+        {
+            if (!canvasGroup) canvasGroup = GetComponent<CanvasGroup>();
+            if (!label) label = GetComponentInChildren<TextMeshProUGUI>(true);
+
+            // �e�� Image ��������Ύq����E���i����̊K�w�ɍ����j
+            if (!backdrop)
+            {
+                backdrop = GetComponent<Image>();
+                if (!backdrop) backdrop = GetComponentInChildren<Image>(true);
+            }
+        }
+
+        // �����͔�\��
+        if (canvasGroup) canvasGroup.alpha = 0f;
+
+        // �w�i�̃��C�A�E�g�i�qImage�ł�OK�j
+        if (backdrop)
+        {
+            var brt = backdrop.rectTransform;
+            // �e�����ς��ɃX�g���b�`���ăp�f�B���O�����^����
+            brt.anchorMin = Vector2.zero;
+            brt.anchorMax = Vector2.one;
+            brt.pivot = new Vector2(0.5f, 0.5f);
+            brt.offsetMin = new Vector2(backdropPadding.x, backdropPadding.y); // left, bottom
+            brt.offsetMax = new Vector2(-backdropPadding.z, -backdropPadding.w); // right, top
+            // �N���b�N�ז����Ȃ�
+            backdrop.raycastTarget = false;
+            // ����K���X���̐F�i�K�X�ύX�j
+            if (backdrop.color.a <= 0.01f)
+                backdrop.color = new Color(1f, 1f, 1f, 0.35f);
+        }
+
+        // �e�L�X�g��N���b�N�ז����Ȃ�
+        if (label) label.raycastTarget = false;
+    }
+
+    public IEnumerator ShowPlayer(int cycleIndex) => ShowInternal(
+        $"{playerTitle}\n<size={Mathf.RoundToInt(sublineScale * 100)}%>{string.Format(turnFormat, cycleIndex)}</size>"
+    );
+
+    public IEnumerator ShowEnemy(int cycleIndex) => ShowInternal(
+        $"{enemyTitle}\n<size={Mathf.RoundToInt(sublineScale * 100)}%>{string.Format(turnFormat, cycleIndex)}</size>"
+    );
+
+    IEnumerator ShowInternal(string text)
+    {
+        if (!canvasGroup || !label) yield break;
+
+        label.text = text;
+
+        // ���g�͏�ɉ�ʒ���
+        var rt = (RectTransform)transform;
+        rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
+        rt.pivot = new Vector2(0.5f, 0.5f);
+        rt.anchoredPosition = Vector2.zero;
+
+        // IN
+        yield return FadeTo(1f, fadeIn);
+        // HOLD
+        yield return new WaitForSecondsRealtime(hold);
+        // OUT
+        yield return FadeTo(0f, fadeOut);
+    }
+
+    IEnumerator FadeTo(float target, float dur)
+    {
+        float start = canvasGroup.alpha;
+        float t = 0f;
+        while (t < dur)
+        {
+            t += Time.unscaledDeltaTime;
+            canvasGroup.alpha = Mathf.Lerp(start, target, Mathf.Clamp01(t / dur));
+            yield return null;
+        }
+        canvasGroup.alpha = target;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\TurnSignal.cs ===
+
+using UnityEngine;
+
+public class TurnSignal : MonoBehaviour
+{
+    // ���݂̃t�F�[�Y���ω������Ƃ��ɒʒm�i���� = �V������ԁj
+    public static System.Action<TurnState> OnPhaseChanged;
+
+    // �v���C���[�^�[���J�n�ʒm
+    public static System.Action OnPlayerTurnStart;
+
+    // �G�^�[���J�n�ʒm
+    public static System.Action OnEnemyTurnStart;
+
+    private TurnState _last;
+
+    void Start()
+    {
+        if (GameManager.Instance != null)
+            _last = GameManager.Instance.currentState;
+    }
+
+    void Update()
+    {
+        var gm = GameManager.Instance;
+        if (gm == null) return;
+
+        var now = gm.currentState;
+        if (now == _last) return;
+
+        // �t�F�[�Y���ς������C�x���g�𔭉�
+        OnPhaseChanged?.Invoke(now);
+
+        // ��Ԃɉ����Đ�p�C�x���g�𔭉�
+        if (now == TurnState.Player_Turn)
+            OnPlayerTurnStart?.Invoke();
+        else if (now == TurnState.Enemy_Turn)
+            OnEnemyTurnStart?.Invoke();
+
+        _last = now;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\TurnState.cs ===
+
+public enum TurnState
+{
+    Player_Turn,
+    Enemy_Turn
+}
+
+
+--------------------------------------------------------------------------------
+
+=== Assets\Scripts\VisionAreaFromCamera.cs ===
+
+using UnityEngine;
+
+/// <summary>
+/// �J�����̌��݂̉������`�icam.rect ��l���j�� BoxCollider2D �𓯊�����B
+/// Layer �� "Vision" �ɐݒ肵�Ă������ƁB
+/// </summary>
+[RequireComponent(typeof(BoxCollider2D))]
+public class VisionAreaFromCamera : MonoBehaviour
+{
+    public Camera cam;             // 1:1 �r���[�|�[�g��g���Ă���J����
+    public Transform follow;       // ���Ƃ��� cam.transform�i�J�����̈ʒu�ɒu���j
+    public float padding = 0f;     // �]���𑫂������ꍇ�i���[���h�P�ʁj
+
+    private BoxCollider2D box;
+
+    void Awake()
+    {
+        box = GetComponent<BoxCollider2D>();
+        box.isTrigger = true;
+        if (cam == null) cam = Camera.main;
+        if (follow == null && cam != null) follow = cam.transform;
+    }
+
+    void LateUpdate()
+    {
+        if (cam == null || follow == null) return;
+
+        // 1) �J�����̎����A�X�y�N�g�icam.rect �𔽉f�A1:1�Ȃ��� 1�j
+        float aspect = cam.aspect;
+
+        // 2) ���݂̉��T�C�Y�i�I�[�\�T�C�Y�͏c�̔����j
+        float worldHeight = cam.orthographicSize * 2f;
+        float worldWidth = worldHeight * aspect;
+
+        // 3) �����`�r���[�|�[�g�iaspect=1�j��z�肵�Ă���Ȃ�AworldWidth �� worldHeight �ƈ�v
+        //    ����ȊO�ł� cam.rect �x�[�X�� aspect �Ő������T�C�Y�ɂȂ�
+
+        // 4) �R���C�_�[�֔��f
+        box.size = new Vector2(worldWidth + padding * 2f, worldHeight + padding * 2f);
+        box.offset = Vector2.zero;
+
+        // 5) �ʒu��J�����ɍ��킹��
+        transform.position = new Vector3(follow.position.x, follow.position.y, 0f);
+    }
+}
+
+
+--------------------------------------------------------------------------------

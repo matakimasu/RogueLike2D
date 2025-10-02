@@ -21,8 +21,8 @@ public class PlayerDamageEffect : MonoBehaviour
         {
             StartCoroutine(DamageFlash());
 
-            // カメラシェイク（CameraControllerを使用）
-            CameraController cam = FindObjectOfType<CameraController>();
+            // カメラシェイク（GridCameraControllerを使用）
+            GridCameraController cam = FindObjectOfType<GridCameraController>();
             if (cam != null)
             {
                 cam.Shake(0.2f, 0.15f); // 0.2秒間、0.15の強さで揺らす

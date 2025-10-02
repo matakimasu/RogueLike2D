@@ -6,13 +6,13 @@ using System.Collections.Generic;
 public abstract class EnemyAIBase : MonoBehaviour
 {
     [Header("参照設定")]
-    [SerializeField] protected Tilemap tilemap;
+    [SerializeField] protected Tilemap tilemap;       // ← Floor 用（既存フィールドを継続利用）
+    [SerializeField] protected Tilemap wallTilemap;   // ← 追加：Wall 用
     [SerializeField] protected Transform playerTransform;
 
     [Header("Layer設定")]
-    [SerializeField] protected LayerMask obstacleLayer;
-    [SerializeField] protected LayerMask bulletLayer;
-    [SerializeField] protected LayerMask playerLayer;
+    [SerializeField] protected LayerMask obstacleLayer; // 壁・進入禁止物など（コライダーベース）
+    [SerializeField] protected LayerMask playerLayer;   // プレイヤーの占有セル判定用（踏み込み防止）
 
     [Header("移動設定")]
     public float moveSpeed = 3.0f;
@@ -26,19 +26,14 @@ public abstract class EnemyAIBase : MonoBehaviour
 
     [Header("効果音設定")]
     public AudioSource audioSource;
-    public AudioClip bulletBreakSE;
     public AudioClip moveSE;
-    public AudioClip attackSE;   // ★ 追加：敵の攻撃SE
+    public AudioClip attackSE;
 
     [Header("演出（ルンジ）設定")]
     [Tooltip("プレイヤー攻撃時に前進→戻る演出を行う")]
     public bool useLungeOnAttack = true;
-    [Tooltip("弾を破壊する時に前進→戻る演出を行う")]
-    public bool useLungeOnBulletBreak = true;
 
     protected SpriteRenderer spriteRenderer;
-
-    private bool _didDestroyBulletThisTurn = false;
 
     protected virtual void Awake()
     {
@@ -47,8 +42,7 @@ public abstract class EnemyAIBase : MonoBehaviour
         if (playerTransform == null)
         {
             GameObject playerObj = GameObject.FindWithTag("Player");
-            if (playerObj != null)
-                playerTransform = playerObj.transform;
+            if (playerObj != null) playerTransform = playerObj.transform;
         }
     }
 
@@ -63,6 +57,11 @@ public abstract class EnemyAIBase : MonoBehaviour
         GameManager.Instance?.RegisterEnemy(this);
     }
 
+    /// <summary>
+    /// 優先順位：
+    /// 1) プレイヤーを攻撃できるなら攻撃
+    /// 2) 攻撃できない → プレイヤーに近づく移動を試みる（Floor のみ、Wall 不可、障害物/プレイヤー占有も不可）
+    /// </summary>
     public virtual IEnumerator TryMoveTowardPlayer()
     {
         if (playerTransform == null || tilemap == null) yield break;
@@ -70,7 +69,7 @@ public abstract class EnemyAIBase : MonoBehaviour
         Vector3Int currentCell = tilemap.WorldToCell(transform.position);
         Vector3Int playerCell = tilemap.WorldToCell(playerTransform.position);
 
-        // ===== 近接攻撃可能？ =====
+        // ===== 1) 近接攻撃可能？ =====
         if (CanAttackPlayer(currentCell, playerCell))
         {
             // ルンジ演出
@@ -95,66 +94,30 @@ public abstract class EnemyAIBase : MonoBehaviour
             yield break;
         }
 
-        // ===== 弾破壊チェック =====
-        yield return StartCoroutine(TryDestroyBulletRoutine(currentCell));
-        if (_didDestroyBulletThisTurn) yield break;
-
-        // ===== 移動処理 =====
+        // ===== 2) 追従移動（距離が縮む方向を貪欲に選択） =====
         Vector3Int[] directions = GetMovementDirections();
         foreach (Vector3Int dir in directions)
         {
             Vector3Int nextCell = currentCell + dir;
+
+            // --- ★ Floor / Wall 判定（最優先で弾く） ---
+            bool hasFloor = tilemap.HasTile(nextCell);
+            bool isWall = (wallTilemap != null) && wallTilemap.HasTile(nextCell);
+            if (!hasFloor || isWall) continue;  // Floor じゃない or Wall にタイルがある → 進入不可
+
             Vector3 worldPos = tilemap.GetCellCenterWorld(nextCell);
             Vector2 checkPoint = new Vector2(worldPos.x, worldPos.y);
 
-            if (Physics2D.OverlapCircle(checkPoint, 0.1f, playerLayer)) continue;
-            if (Physics2D.OverlapPoint(checkPoint, obstacleLayer)) continue;
-            if (Physics2D.OverlapPoint(checkPoint, bulletLayer)) continue;
+            // 進入不可チェック（物理 & プレイヤー占有）
+            if (Physics2D.OverlapCircle(checkPoint, 0.1f, playerLayer)) continue;   // プレイヤー位置は不可
+            if (Physics2D.OverlapPoint(checkPoint, obstacleLayer)) continue;        // コライダー障害物は不可
 
-            float currentDist = Vector3.Distance(currentCell, playerCell);
-            float newDist = Vector3.Distance(nextCell, playerCell);
+            float currentDist = Vector3.SqrMagnitude((Vector3)(currentCell - playerCell));
+            float newDist = Vector3.SqrMagnitude((Vector3)(nextCell - playerCell));
+
             if (newDist < currentDist)
             {
                 yield return StartCoroutine(MoveToPosition(worldPos));
-                yield break;
-            }
-        }
-    }
-
-    // ===== 弾破壊処理 =====
-    protected virtual IEnumerator TryDestroyBulletRoutine(Vector3Int currentCell)
-    {
-        _didDestroyBulletThisTurn = false;
-
-        Vector3Int[] directions = GetMovementDirections();
-
-        foreach (Vector3Int dir in directions)
-        {
-            Vector3Int checkCell = currentCell + dir;
-            Vector3 worldPos = tilemap.GetCellCenterWorld(checkCell);
-            Vector2 checkPoint = new Vector2(worldPos.x, worldPos.y);
-
-            Collider2D bulletHit = Physics2D.OverlapPoint(checkPoint, bulletLayer);
-            if (bulletHit != null)
-            {
-                // ルンジ演出
-                if (useLungeOnBulletBreak)
-                {
-                    var lunge = GetComponent<PlayerAttackLunge>();
-                    if (lunge != null)
-                    {
-                        yield return StartCoroutine(lunge.PlayTowardWorld(worldPos));
-                    }
-                }
-
-                // 破壊SE
-                if (audioSource != null && bulletBreakSE != null)
-                    audioSource.PlayOneShot(bulletBreakSE);
-
-                Destroy(bulletHit.gameObject);
-
-                _didDestroyBulletThisTurn = true;
-                yield return new WaitForSeconds(0.2f);
                 yield break;
             }
         }
@@ -202,15 +165,12 @@ public abstract class EnemyAIBase : MonoBehaviour
     // ===== 攻撃範囲プレビュー（AttackTileDirector用） =====
     public virtual IEnumerable<Vector3Int> GetAttackCellsPreview()
     {
-        if (tilemap == null)
-            yield break;
+        if (tilemap == null) yield break;
 
         Vector3Int currentCell = tilemap.WorldToCell(transform.position);
-
         foreach (var dir in GetMovementDirections())
         {
             Vector3Int checkCell = currentCell + dir;
-
             if (CanAttackPlayer(currentCell, checkCell))
                 yield return checkCell;
         }
